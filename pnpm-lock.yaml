@@ -385,6 +385,10 @@ importers:
 
   apps/api: {}
 
+  apps/worker: {}
+
+  packages/db: {}
+
   packages/shared: {}
 
 packages:
