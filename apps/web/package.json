@@ -7,6 +7,6 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"console.log('API behavioral tests will be implemented in Phase 4')\""
+    "test": "node -e \"console.log('Web tests not implemented')\""
   }
 }

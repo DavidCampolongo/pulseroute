@@ -7,6 +7,6 @@
     "dev": "tsc -p tsconfig.json --watch",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"console.log('No shared-package tests yet')\""
+    "test": "node -e \"console.log('No db-package tests yet')\""
   }
 }
