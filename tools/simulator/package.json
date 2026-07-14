@@ -1,0 +1,12 @@
+{
+  "name": "@pulseroute/simulator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"console.log('simulator tests are not yet implemented')\""
+  }
+}
