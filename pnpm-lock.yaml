@@ -389,6 +389,8 @@ importers:
 
   packages/db: {}
 
+  packages/scoring: {}
+
   packages/shared: {}
 
 packages:

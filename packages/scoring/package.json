@@ -1,0 +1,12 @@
+{
+  "name": "@pulseroute/scoring",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsc -p tsconfig.json --watch",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"console.log('No scoring-package tests yet')\""
+  }
+}
