@@ -21,12 +21,24 @@ jobs:
         with:
           node-version: 24.18.0
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v6
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.12.0
+          pnpm --version
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v6
         with:
-          version: 11.12.0
-          cache: true
-          cache_dependency_path: pnpm-lock.yaml
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
 
       - name: Verify toolchain
         run: |
