@@ -10,7 +10,14 @@
     "test": "pnpm -r run test",
     "lint": "eslint .",
     "format": "prettier . --write",
-    "format:check": "prettier . --check"
+    "format:check": "prettier . --check",
+    "db:validate": "pnpm --filter @pulseroute/db run db:validate",
+    "db:format": "pnpm --filter @pulseroute/db run db:format",
+    "db:generate": "pnpm --filter @pulseroute/db run db:generate",
+    "db:migrate:dev": "pnpm --filter @pulseroute/db run db:migrate:dev",
+    "db:migrate:deploy": "pnpm --filter @pulseroute/db run db:migrate:deploy",
+    "db:migrate:reset": "pnpm --filter @pulseroute/db run db:migrate:reset",
+    "db:studio": "pnpm --filter @pulseroute/db run db:studio"
   },
   "keywords": [],
   "author": "",

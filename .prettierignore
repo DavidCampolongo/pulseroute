@@ -3,3 +3,4 @@ node_modules
 **/coverage
 **/.next
 pnpm-lock.yaml
+packages/db/src/generated/prisma

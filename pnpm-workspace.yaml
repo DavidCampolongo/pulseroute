@@ -2,5 +2,10 @@ packages:
   - "apps/*"
   - "packages/*"
   - "tools/*"
+
+savePrefix: ""
+
 allowBuilds:
+  "@prisma/engines": true
   esbuild: true
+  prisma: true
