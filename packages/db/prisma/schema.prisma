@@ -6,3 +6,146 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum UserRole {
+  ADMIN
+  DISPATCHER
+  VIEWER
+}
+
+enum OperatorStatus {
+  AVAILABLE
+  UNAVAILABLE
+  INACTIVE
+}
+
+enum ServiceRequestStatus {
+  PENDING
+  ASSIGNED
+  UNROUTABLE
+  CANCELLED
+}
+
+enum ServiceRequestPriority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum AssignmentStatus {
+  ACTIVE
+  CANCELLED
+}
+
+model Organization {
+  id              String           @id @default(uuid()) @db.Uuid
+  name            String
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
+  users           User[]
+  operators       Operator[]
+  skills          Skill[]
+  serviceRequests ServiceRequest[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  email          String
+  passwordHash   String   @map("password_hash")
+  role           UserRole @default(VIEWER)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, email])
+  @@map("users")
+}
+
+model Operator {
+  id                       String         @id @default(uuid()) @db.Uuid
+  organizationId           String         @map("organization_id") @db.Uuid
+  name                     String
+  status                   OperatorStatus @default(UNAVAILABLE)
+  region                   String
+  maxConcurrentAssignments Int            @default(1) @map("max_concurrent_assignments")
+  createdAt                DateTime       @default(now()) @map("created_at")
+  updatedAt                DateTime       @default(now()) @updatedAt @map("updated_at")
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  operatorSkills OperatorSkill[]
+  assignments    Assignment[]
+
+  @@unique([id, organizationId])
+  @@map("operators")
+}
+
+model Skill {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  operatorSkills  OperatorSkill[]
+  serviceRequests ServiceRequest[]
+
+  @@unique([organizationId, name])
+  @@unique([id, organizationId])
+  @@map("skills")
+}
+
+model OperatorSkill {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  operatorId     String   @map("operator_id") @db.Uuid
+  skillId        String   @map("skill_id") @db.Uuid
+  level          Int
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  operator Operator @relation(fields: [operatorId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  skill    Skill    @relation(fields: [skillId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([operatorId, skillId])
+  @@map("operator_skills")
+}
+
+model ServiceRequest {
+  id              String                 @id @default(uuid()) @db.Uuid
+  organizationId  String                 @map("organization_id") @db.Uuid
+  externalId      String                 @map("external_id")
+  requiredSkillId String                 @map("required_skill_id") @db.Uuid
+  status          ServiceRequestStatus   @default(PENDING)
+  priority        ServiceRequestPriority @default(NORMAL)
+  region          String
+  createdAt       DateTime               @default(now()) @map("created_at")
+  updatedAt       DateTime               @default(now()) @updatedAt @map("updated_at")
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  requiredSkill Skill        @relation(fields: [requiredSkillId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  assignments   Assignment[]
+
+  @@unique([organizationId, externalId])
+  @@unique([id, organizationId])
+  @@map("service_requests")
+}
+
+model Assignment {
+  id               String           @id @default(uuid()) @db.Uuid
+  organizationId   String           @map("organization_id") @db.Uuid
+  serviceRequestId String           @map("service_request_id") @db.Uuid
+  operatorId       String           @map("operator_id") @db.Uuid
+  status           AssignmentStatus @default(ACTIVE)
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @default(now()) @updatedAt @map("updated_at")
+
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  operator       Operator       @relation(fields: [operatorId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@map("assignments")
+}
