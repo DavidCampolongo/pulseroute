@@ -12,6 +12,24 @@ jobs:
     name: Validate repository
     runs-on: ubuntu-latest
 
+    env:
+      DATABASE_URL: postgresql://pulseroute:pulseroute_ci_password@localhost:5432/pulseroute_ci
+
+    services:
+      postgres:
+        image: postgres:16.14-bookworm
+        env:
+          POSTGRES_DB: pulseroute_ci
+          POSTGRES_USER: pulseroute
+          POSTGRES_PASSWORD: pulseroute_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pulseroute -d pulseroute_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -47,6 +65,15 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Validate Prisma schema
+        run: pnpm db:validate
+
+      - name: Generate Prisma Client
+        run: pnpm db:generate
+
+      - name: Apply database migrations
+        run: pnpm db:migrate:deploy
 
       - name: Check formatting
         run: pnpm format:check
