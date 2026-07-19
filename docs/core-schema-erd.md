@@ -30,55 +30,84 @@ Later tables for webhooks, routing decisions, deliveries, audit logs, queues, an
 
 ## ERD
 
+The schema is shown in two views to keep the relationships readable. The relationship table above remains the complete reference.
+
+### Tenant ownership
+
 ```mermaid
 erDiagram
-    ORGANIZATION ||--o{ USER : has
-    ORGANIZATION ||--o{ OPERATOR : has
+    ORGANIZATION ||--o{ USER : contains
+    ORGANIZATION ||--o{ OPERATOR : employs
     ORGANIZATION ||--o{ SKILL : defines
     ORGANIZATION ||--o{ SERVICE_REQUEST : owns
-    SKILL ||--o{ SERVICE_REQUEST : required_for
-
-    OPERATOR ||--o{ OPERATOR_SKILL : has
-    SKILL ||--o{ OPERATOR_SKILL : belongs_to
-
-    SERVICE_REQUEST ||--o{ ASSIGNMENT : receives
-    OPERATOR ||--o{ ASSIGNMENT : receives
 
     ORGANIZATION {
-        string id PK
+        uuid id PK
     }
 
     USER {
-        string id PK
-        string organization_id FK
+        uuid id PK
+        uuid organization_id FK
     }
 
     OPERATOR {
-        string id PK
-        string organization_id FK
+        uuid id PK
+        uuid organization_id FK
     }
 
     SKILL {
-        string id PK
-        string organization_id FK
-    }
-
-    OPERATOR_SKILL {
-        string id PK
-        string operator_id FK
-        string skill_id FK
+        uuid id PK
+        uuid organization_id FK
     }
 
     SERVICE_REQUEST {
-        string id PK
-        string organization_id FK
-        string required_skill_id FK
+        uuid id PK
+        uuid organization_id FK
+        string external_id
+        uuid required_skill_id FK
+    }
+```
+
+### Skills and assignments
+
+```mermaid
+erDiagram
+    OPERATOR ||--o{ OPERATOR_SKILL : has
+    SKILL ||--o{ OPERATOR_SKILL : qualifies
+    SKILL ||--o{ SERVICE_REQUEST : required_by
+    SERVICE_REQUEST ||--o{ ASSIGNMENT : has_history
+    OPERATOR ||--o{ ASSIGNMENT : receives
+
+    OPERATOR {
+        uuid id PK
+        uuid organization_id FK
+    }
+
+    SKILL {
+        uuid id PK
+        uuid organization_id FK
+    }
+
+    OPERATOR_SKILL {
+        uuid id PK
+        uuid organization_id FK
+        uuid operator_id FK
+        uuid skill_id FK
+        int level
+    }
+
+    SERVICE_REQUEST {
+        uuid id PK
+        uuid organization_id FK
+        string external_id
+        uuid required_skill_id FK
     }
 
     ASSIGNMENT {
-        string id PK
-        string service_request_id FK
-        string operator_id FK
+        uuid id PK
+        uuid organization_id FK
+        uuid service_request_id FK
+        uuid operator_id FK
     }
 ```
 
