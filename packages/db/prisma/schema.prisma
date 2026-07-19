@@ -80,6 +80,7 @@ model Operator {
   assignments    Assignment[]
 
   @@unique([id, organizationId])
+  @@index([organizationId, status, region])
   @@map("operators")
 }
 
@@ -112,6 +113,7 @@ model OperatorSkill {
   skill    Skill    @relation(fields: [skillId, organizationId], references: [id, organizationId], onDelete: Restrict)
 
   @@unique([operatorId, skillId])
+  @@index([organizationId, skillId])
   @@map("operator_skills")
 }
 
@@ -132,6 +134,10 @@ model ServiceRequest {
 
   @@unique([organizationId, externalId])
   @@unique([id, organizationId])
+  @@index([organizationId, status, createdAt])
+  @@index([organizationId, priority, createdAt])
+  @@index([organizationId, region, createdAt])
+  @@index([organizationId, requiredSkillId, createdAt])
   @@map("service_requests")
 }
 
@@ -147,5 +153,7 @@ model Assignment {
   serviceRequest ServiceRequest @relation(fields: [serviceRequestId, organizationId], references: [id, organizationId], onDelete: Restrict)
   operator       Operator       @relation(fields: [operatorId, organizationId], references: [id, organizationId], onDelete: Restrict)
 
+  @@index([organizationId, operatorId, status])
+  @@index([organizationId, serviceRequestId, createdAt])
   @@map("assignments")
 }
