@@ -17,7 +17,8 @@
     "db:migrate:dev": "pnpm --filter @pulseroute/db run db:migrate:dev",
     "db:migrate:deploy": "pnpm --filter @pulseroute/db run db:migrate:deploy",
     "db:migrate:reset": "pnpm --filter @pulseroute/db run db:migrate:reset",
-    "db:studio": "pnpm --filter @pulseroute/db run db:studio"
+    "db:studio": "pnpm --filter @pulseroute/db run db:studio",
+    "db:seed": "pnpm --filter @pulseroute/db run db:seed"
   },
   "keywords": [],
   "author": "",
