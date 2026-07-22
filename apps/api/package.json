@@ -8,5 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node -e \"console.log('API behavioral tests will be implemented in Phase 4')\""
+  },
+  "dependencies": {
+    "zod": "4.4.3"
   }
 }
