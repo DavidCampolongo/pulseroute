@@ -10,6 +10,11 @@
     "test": "node -e \"console.log('API behavioral tests will be implemented in Phase 4')\""
   },
   "dependencies": {
+    "dotenv": "17.4.2",
+    "fastify": "5.10.0",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3"
   }
 }
