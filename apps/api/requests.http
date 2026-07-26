@@ -1,0 +1,11 @@
+### Health check
+GET http://127.0.0.1:3000/health
+
+### OpenAPI document
+GET http://127.0.0.1:3000/docs/json
+
+### Swagger UI
+GET http://127.0.0.1:3000/docs/
+
+### Unknown route
+GET http://127.0.0.1:3000/does-not-exist

@@ -1,8 +1,8 @@
-# PulseRoute Core Schema ERD
+# PulseRoute Database ERD
 
 ## Scope
 
-This document covers the core database models:
+PulseRoute has 12 application tables:
 
 - Organization
 - User
@@ -11,110 +11,103 @@ This document covers the core database models:
 - OperatorSkill
 - ServiceRequest
 - Assignment
+- WebhookEvent
+- OutboxEvent
+- RoutingDecision
+- WebhookDelivery
+- AuditLog
 
-Later tables for webhooks, routing decisions, deliveries, audit logs, queues, and authentication are intentionally excluded.
+`_prisma_migrations` belongs to Prisma and is not part of the app model.
 
-## Relationships
+Phase 3 only adds database storage. It does not run webhooks, routing, queues, retries, auth, or outbound requests.
 
-| Relationship                  | Type                  | Foreign key lives on | Required | On parent deletion | Why it exists                                         |
-| ----------------------------- | --------------------- | -------------------- | -------- | ------------------ | ----------------------------------------------------- |
-| Organization → User           | One-to-many           | User                 | Yes      | Restrict           | Keeps login accounts inside one organization          |
-| Organization → Operator       | One-to-many           | Operator             | Yes      | Restrict           | Keeps each organization’s workforce separate          |
-| Organization → Skill          | One-to-many           | Skill                | Yes      | Restrict           | Lets each organization manage its own skill list      |
-| Organization → ServiceRequest | One-to-many           | ServiceRequest       | Yes      | Restrict           | Identifies which organization owns the request        |
-| Operator → OperatorSkill      | One-to-many           | OperatorSkill        | Yes      | Cascade            | Records the skills an operator has                    |
-| Skill → OperatorSkill         | One-to-many           | OperatorSkill        | Yes      | Restrict           | Connects an operator’s qualification to a valid skill |
-| ServiceRequest → Assignment   | One-to-many over time | Assignment           | Yes      | Restrict           | Preserves the assignment history of a request         |
-| Operator → Assignment         | One-to-many           | Assignment           | Yes      | Restrict           | Records which operator received an assignment         |
-| Skill → ServiceRequest        | One-to-many           | ServiceRequest       | Yes      | Restrict           | Identifies the skill required by a request            |
-
-## ERD
-
-The schema is shown in two views to keep the relationships readable. The relationship table above remains the complete reference.
-
-### Tenant ownership
+## Core data
 
 ```mermaid
 erDiagram
-    ORGANIZATION ||--o{ USER : contains
-    ORGANIZATION ||--o{ OPERATOR : employs
-    ORGANIZATION ||--o{ SKILL : defines
-    ORGANIZATION ||--o{ SERVICE_REQUEST : owns
+    ORGANIZATION ||--o{ USER : has
+    ORGANIZATION ||--o{ OPERATOR : has
+    ORGANIZATION ||--o{ SKILL : has
+    ORGANIZATION ||--o{ SERVICE_REQUEST : has
 
-    ORGANIZATION {
-        uuid id PK
-    }
-
-    USER {
-        uuid id PK
-        uuid organization_id FK
-    }
-
-    OPERATOR {
-        uuid id PK
-        uuid organization_id FK
-    }
-
-    SKILL {
-        uuid id PK
-        uuid organization_id FK
-    }
-
-    SERVICE_REQUEST {
-        uuid id PK
-        uuid organization_id FK
-        string external_id
-        uuid required_skill_id FK
-    }
-```
-
-### Skills and assignments
-
-```mermaid
-erDiagram
     OPERATOR ||--o{ OPERATOR_SKILL : has
-    SKILL ||--o{ OPERATOR_SKILL : qualifies
+    SKILL ||--o{ OPERATOR_SKILL : used_by
+
     SKILL ||--o{ SERVICE_REQUEST : required_by
-    SERVICE_REQUEST ||--o{ ASSIGNMENT : has_history
+    SERVICE_REQUEST ||--o{ ASSIGNMENT : has
     OPERATOR ||--o{ ASSIGNMENT : receives
-
-    OPERATOR {
-        uuid id PK
-        uuid organization_id FK
-    }
-
-    SKILL {
-        uuid id PK
-        uuid organization_id FK
-    }
-
-    OPERATOR_SKILL {
-        uuid id PK
-        uuid organization_id FK
-        uuid operator_id FK
-        uuid skill_id FK
-        int level
-    }
-
-    SERVICE_REQUEST {
-        uuid id PK
-        uuid organization_id FK
-        string external_id
-        uuid required_skill_id FK
-    }
-
-    ASSIGNMENT {
-        uuid id PK
-        uuid organization_id FK
-        uuid service_request_id FK
-        uuid operator_id FK
-    }
 ```
 
-## Important rules
+## Event and history data
 
-An `OperatorSkill` must not connect an operator from one organization to a skill owned by another organization.
+```mermaid
+erDiagram
+    ORGANIZATION ||--o{ WEBHOOK_EVENT : owns
+    ORGANIZATION ||--o{ OUTBOX_EVENT : owns
+    ORGANIZATION ||--o{ ROUTING_DECISION : owns
+    ORGANIZATION ||--o{ WEBHOOK_DELIVERY : owns
+    ORGANIZATION ||--o{ AUDIT_LOG : owns
 
-An `Assignment` must not connect a service request from one organization to an operator from another organization.
+    SERVICE_REQUEST o|--o{ WEBHOOK_EVENT : linked_to
+    SERVICE_REQUEST ||--o{ ROUTING_DECISION : has
+    ASSIGNMENT o|--o| ROUTING_DECISION : created_by
 
-Normal foreign keys prove that the referenced records exist. They do not automatically prove that both records belong to the same organization. We will handle that during the constraint design.
+    OUTBOX_EVENT ||--o{ WEBHOOK_DELIVERY : has
+    USER o|--o{ AUDIT_LOG : acts_in
+```
+
+## New Phase 3 tables
+
+### WebhookEvent
+
+Stores what an outside system sent to PulseRoute.
+
+It keeps the raw request body, the parsed JSON when possible, its status, and the service request it created.
+
+### OutboxEvent
+
+Stores work that PulseRoute must do later.
+
+A worker will use these rows in Phase 9. The table keeps the work state, retry count, next attempt time, payload, and latest error.
+
+### RoutingDecision
+
+Stores why routing picked an operator or found no valid match.
+
+It links to the service request, keeps the scoring version, and stores the full decision details in JSONB.
+
+### WebhookDelivery
+
+Stores one outbound webhook attempt.
+
+One outbox event can have many attempts. Each row keeps the attempt number, result, time, HTTP status, and error details.
+
+### AuditLog
+
+Stores important user and system actions.
+
+It records who acted, what they did, which item they acted on, when it happened, and any extra details.
+
+## Main rules
+
+- Each row belongs to one organization.
+- Cross-table links must stay inside the same organization.
+- A service request is unique by organization and external ID.
+- An operator cannot have the same skill twice.
+- Skill levels must stay in the allowed range.
+- Operator capacity must be greater than zero.
+- Outbox attempt counts cannot be negative.
+- Delivery attempt numbers must be greater than zero.
+- A successful or failed delivery must have a completion time.
+- An assigned routing decision must point to an assignment.
+- An unroutable decision must not point to an assignment.
+- A user audit row must name a user.
+- A system audit row must not name a user.
+
+The rule that only one active assignment may exist for a service request stays deferred to Phase 7.
+
+## Why PostgreSQL
+
+PulseRoute needs foreign keys, unique rules, transactions, and strong tenant checks.
+
+PostgreSQL gives us those rules while JSONB lets us store payloads, routing details, errors, and audit data that do not always share one fixed shape.

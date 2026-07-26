@@ -7,6 +7,19 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"console.log('API behavioral tests will be implemented in Phase 4')\""
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/swagger": "9.8.1",
+    "@fastify/swagger-ui": "5.2.6",
+    "@pulseroute/db": "workspace:*",
+    "dotenv": "17.4.2",
+    "fastify": "5.10.0",
+    "fastify-plugin": "6.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "vitest": "4.1.10"
   }
 }

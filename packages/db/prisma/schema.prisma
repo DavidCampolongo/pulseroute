@@ -37,15 +37,48 @@ enum AssignmentStatus {
   CANCELLED
 }
 
+enum WebhookEventStatus {
+  PROCESSED
+  MALFORMED
+}
+
+enum OutboxEventStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  EXHAUSTED
+}
+
+enum RoutingDecisionOutcome {
+  ASSIGNED
+  UNROUTABLE
+}
+
+enum WebhookDeliveryStatus {
+  STARTED
+  SUCCEEDED
+  FAILED
+}
+
+enum AuditActorType {
+  USER
+  SYSTEM
+}
+
 model Organization {
-  id              String           @id @default(uuid()) @db.Uuid
-  name            String
-  createdAt       DateTime         @default(now()) @map("created_at")
-  updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
-  users           User[]
-  operators       Operator[]
-  skills          Skill[]
-  serviceRequests ServiceRequest[]
+  id                String            @id @default(uuid()) @db.Uuid
+  name              String
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @default(now()) @updatedAt @map("updated_at")
+  users             User[]
+  operators         Operator[]
+  skills            Skill[]
+  serviceRequests   ServiceRequest[]
+  webhookEvents     WebhookEvent[]
+  outboxEvents      OutboxEvent[]
+  routingDecisions  RoutingDecision[]
+  webhookDeliveries WebhookDelivery[]
+  auditLogs         AuditLog[]
 
   @@map("organizations")
 }
@@ -60,8 +93,10 @@ model User {
   updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  auditLogs    AuditLog[]
 
   @@unique([organizationId, email])
+  @@unique([id, organizationId])
   @@map("users")
 }
 
@@ -128,9 +163,11 @@ model ServiceRequest {
   createdAt       DateTime               @default(now()) @map("created_at")
   updatedAt       DateTime               @default(now()) @updatedAt @map("updated_at")
 
-  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  requiredSkill Skill        @relation(fields: [requiredSkillId, organizationId], references: [id, organizationId], onDelete: Restrict)
-  assignments   Assignment[]
+  organization     Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  requiredSkill    Skill             @relation(fields: [requiredSkillId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  assignments      Assignment[]
+  webhookEvents    WebhookEvent[]
+  routingDecisions RoutingDecision[]
 
   @@unique([organizationId, externalId])
   @@unique([id, organizationId])
@@ -139,6 +176,115 @@ model ServiceRequest {
   @@index([organizationId, region, createdAt])
   @@index([organizationId, requiredSkillId, createdAt])
   @@map("service_requests")
+}
+
+model WebhookEvent {
+  id               String             @id @default(uuid()) @db.Uuid
+  organizationId   String             @map("organization_id") @db.Uuid
+  serviceRequestId String?            @map("service_request_id") @db.Uuid
+  provider         String
+  externalEventId  String?            @map("external_event_id")
+  status           WebhookEventStatus
+  rawBody          Bytes              @map("raw_body") @db.ByteA
+  parsedPayload    Json?              @map("parsed_payload") @db.JsonB
+  malformedReason  String?            @map("malformed_reason")
+  receivedAt       DateTime           @default(now()) @map("received_at")
+  classifiedAt     DateTime           @default(now()) @map("classified_at")
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  serviceRequest ServiceRequest? @relation(fields: [serviceRequestId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@index([organizationId, status, receivedAt])
+  @@index([organizationId, provider, externalEventId])
+  @@index([organizationId, serviceRequestId])
+  @@map("webhook_events")
+}
+
+model OutboxEvent {
+  id                  String            @id @default(uuid()) @db.Uuid
+  organizationId      String            @map("organization_id") @db.Uuid
+  eventType           String            @map("event_type")
+  aggregateType       String            @map("aggregate_type")
+  aggregateId         String            @map("aggregate_id") @db.Uuid
+  status              OutboxEventStatus @default(PENDING)
+  payload             Json              @db.JsonB
+  attemptCount        Int               @default(0) @map("attempt_count")
+  nextAttemptAt       DateTime          @default(now()) @map("next_attempt_at")
+  processingStartedAt DateTime?         @map("processing_started_at")
+  processedAt         DateTime?         @map("processed_at")
+  lastError           Json?             @map("last_error") @db.JsonB
+  createdAt           DateTime          @default(now()) @map("created_at")
+  updatedAt           DateTime          @default(now()) @updatedAt @map("updated_at")
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  deliveries   WebhookDelivery[]
+
+  @@unique([id, organizationId])
+  @@index([status, nextAttemptAt])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, aggregateType, aggregateId])
+  @@map("outbox_events")
+}
+
+model RoutingDecision {
+  id               String                 @id @default(uuid()) @db.Uuid
+  organizationId   String                 @map("organization_id") @db.Uuid
+  serviceRequestId String                 @map("service_request_id") @db.Uuid
+  assignmentId     String?                @map("assignment_id") @db.Uuid
+  scoringVersion   String                 @map("scoring_version")
+  outcome          RoutingDecisionOutcome
+  decisionSnapshot Json                   @map("decision_snapshot") @db.JsonB
+  decidedAt        DateTime               @default(now()) @map("decided_at")
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  assignment     Assignment?    @relation(fields: [assignmentId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([assignmentId, organizationId])
+  @@index([organizationId, serviceRequestId, decidedAt])
+  @@index([organizationId, outcome, decidedAt])
+  @@map("routing_decisions")
+}
+
+model WebhookDelivery {
+  id               String                @id @default(uuid()) @db.Uuid
+  organizationId   String                @map("organization_id") @db.Uuid
+  outboxEventId    String                @map("outbox_event_id") @db.Uuid
+  attemptNumber    Int                   @map("attempt_number")
+  status           WebhookDeliveryStatus @default(STARTED)
+  startedAt        DateTime              @default(now()) @map("started_at")
+  completedAt      DateTime?             @map("completed_at")
+  httpStatus       Int?                  @map("http_status")
+  errorDetails     Json?                 @map("error_details") @db.JsonB
+  responseMetadata Json?                 @map("response_metadata") @db.JsonB
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  outboxEvent  OutboxEvent  @relation(fields: [outboxEventId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([organizationId, outboxEventId, attemptNumber])
+  @@index([organizationId, status, startedAt])
+  @@map("webhook_deliveries")
+}
+
+model AuditLog {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @map("organization_id") @db.Uuid
+  actorType      AuditActorType @map("actor_type")
+  actorUserId    String?        @map("actor_user_id") @db.Uuid
+  action         String
+  entityType     String         @map("entity_type")
+  entityId       String         @map("entity_id")
+  correlationId  String?        @map("correlation_id")
+  metadata       Json?          @db.JsonB
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  actorUser    User?        @relation(fields: [actorUserId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, entityType, entityId, createdAt])
+  @@index([organizationId, action, createdAt])
+  @@map("audit_logs")
 }
 
 model Assignment {
@@ -150,9 +296,11 @@ model Assignment {
   createdAt        DateTime         @default(now()) @map("created_at")
   updatedAt        DateTime         @default(now()) @updatedAt @map("updated_at")
 
-  serviceRequest ServiceRequest @relation(fields: [serviceRequestId, organizationId], references: [id, organizationId], onDelete: Restrict)
-  operator       Operator       @relation(fields: [operatorId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  serviceRequest  ServiceRequest   @relation(fields: [serviceRequestId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  operator        Operator         @relation(fields: [operatorId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  routingDecision RoutingDecision?
 
+  @@unique([id, organizationId])
   @@index([organizationId, operatorId, status])
   @@index([organizationId, serviceRequestId, createdAt])
   @@map("assignments")
