@@ -5,6 +5,7 @@ import { registerErrorHandler } from "./error-handler.js";
 import { databasePlugin } from "./plugins/database.js";
 import { documentationPlugin } from "./plugins/documentation.js";
 import { healthRoutes } from "./routes/health.js";
+import { webhookRoutes } from "./routes/webhooks.js";
 
 export function buildApp(config: AppConfig): FastifyInstance {
   const app = Fastify({
@@ -22,6 +23,10 @@ export function buildApp(config: AppConfig): FastifyInstance {
   app.register(documentationPlugin);
 
   app.register(healthRoutes);
+
+  app.register(webhookRoutes, {
+    prefix: "/webhooks",
+  });
 
   return app;
 }
