@@ -1,13 +1,16 @@
 import { isUtf8 } from "node:buffer";
 
+import type { Prisma } from "@pulseroute/db";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 
 import { AppError } from "../errors.js";
 import { registerWebhookRawBodyParser } from "../plugins/webhook-raw-body.js";
 import {
+  WEBHOOK_PROVIDER,
   WEBHOOK_SIGNATURE_HEADER,
   WEBHOOK_TIMESTAMP_HEADER,
   serviceRequestWebhookSchema,
+  webhookEvidenceIdentitySchema,
 } from "../webhooks/contract.js";
 import { verifyWebhookSignature } from "../webhooks/signature.js";
 
@@ -15,8 +18,6 @@ type WebhookRouteOptions = {
   webhookSecret: string;
   webhookToleranceSeconds: number;
 };
-
-const provider = "pulseroute";
 
 function readHeader(
   request: FastifyRequest,
@@ -78,7 +79,7 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
     if (!verification.ok) {
       request.log.warn(
         {
-          provider,
+          provider: WEBHOOK_PROVIDER,
           webhookVerificationOutcome: "rejected",
           webhookVerificationReason: verification.reason,
         },
@@ -99,7 +100,7 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
     } catch (error) {
       request.log.warn(
         {
-          provider,
+          provider: WEBHOOK_PROVIDER,
           webhookVerificationOutcome: "verified",
           ingestionStatus: "invalid_json",
         },
@@ -112,13 +113,82 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
     const payloadResult = serviceRequestWebhookSchema.safeParse(parsedPayload);
 
     if (!payloadResult.success) {
+      const evidenceIdentity =
+        webhookEvidenceIdentitySchema.safeParse(parsedPayload);
+
+      if (!evidenceIdentity.success) {
+        request.log.warn(
+          {
+            provider: WEBHOOK_PROVIDER,
+            webhookVerificationOutcome: "verified",
+            ingestionStatus: "invalid_payload_unattributed",
+            payloadValidationIssueCount: payloadResult.error.issues.length,
+          },
+          "Authenticated malformed webhook could not be attributed",
+        );
+
+        throw new AppError(
+          400,
+          "WEBHOOK_PAYLOAD_INVALID",
+          "Webhook payload is invalid",
+        );
+      }
+
+      const organization = await app.db.organization.findUnique({
+        where: {
+          id: evidenceIdentity.data.organizationId,
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (!organization) {
+        request.log.warn(
+          {
+            provider: WEBHOOK_PROVIDER,
+            webhookVerificationOutcome: "verified",
+            ingestionStatus: "invalid_payload_unknown_organization",
+            organizationId: evidenceIdentity.data.organizationId,
+            externalEventId: evidenceIdentity.data.eventId,
+            payloadValidationIssueCount: payloadResult.error.issues.length,
+          },
+          "Authenticated malformed webhook referenced an unknown organization",
+        );
+
+        throw new AppError(
+          400,
+          "WEBHOOK_PAYLOAD_INVALID",
+          "Webhook payload is invalid",
+        );
+      }
+
+      const malformedEvent = await app.db.webhookEvent.create({
+        data: {
+          organizationId: organization.id,
+          provider: WEBHOOK_PROVIDER,
+          externalEventId: evidenceIdentity.data.eventId ?? null,
+          status: "MALFORMED",
+          rawBody: Uint8Array.from(request.rawBody),
+          parsedPayload: parsedPayload as Prisma.InputJsonValue,
+          malformedReason: "SERVICE_REQUEST_CONTRACT_INVALID",
+        },
+        select: {
+          id: true,
+        },
+      });
+
       request.log.warn(
         {
-          provider,
+          provider: WEBHOOK_PROVIDER,
           webhookVerificationOutcome: "verified",
-          ingestionStatus: "invalid_payload",
+          ingestionStatus: "malformed_retained",
+          organizationId: organization.id,
+          externalEventId: evidenceIdentity.data.eventId,
+          webhookEventId: malformedEvent.id,
+          payloadValidationIssueCount: payloadResult.error.issues.length,
         },
-        "Authenticated webhook failed payload validation",
+        "Authenticated malformed webhook evidence retained",
       );
 
       throw new AppError(
@@ -130,7 +200,7 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
 
     request.log.info(
       {
-        provider,
+        provider: WEBHOOK_PROVIDER,
         webhookVerificationOutcome: "verified",
         ingestionStatus: "verified_pending_persistence",
         organizationId: payloadResult.data.organizationId,

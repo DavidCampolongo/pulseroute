@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import {
+  WEBHOOK_PROVIDER,
   WEBHOOK_SIGNATURE_HEADER,
   WEBHOOK_TIMESTAMP_HEADER,
 } from "../src/webhooks/contract.js";
@@ -24,6 +25,12 @@ const webhookSecret = "test-webhook-secret-at-least-32-characters";
 
 const webhookToleranceSeconds = 300;
 
+const organizationId = "10000001-0000-4000-8000-000000000001";
+
+const unknownOrganizationId = "10000002-0000-4000-8000-000000000002";
+
+const malformedEventPrefix = "evt-malformed-evidence-";
+
 const app = buildApp({
   nodeEnv: "test",
   host: "127.0.0.1",
@@ -36,7 +43,7 @@ const app = buildApp({
 
 function validPayload(): string {
   return JSON.stringify({
-    organizationId: "00000001-0000-4000-8000-000000000001",
+    organizationId,
     eventId: "evt-verification-001",
     type: "service_request.created",
     data: {
@@ -69,9 +76,45 @@ function signedHeaders(
 
 beforeAll(async () => {
   await app.ready();
+
+  await app.db.webhookEvent.deleteMany({
+    where: {
+      provider: WEBHOOK_PROVIDER,
+      externalEventId: {
+        startsWith: malformedEventPrefix,
+      },
+    },
+  });
+
+  await app.db.organization.upsert({
+    where: {
+      id: organizationId,
+    },
+    update: {},
+    create: {
+      id: organizationId,
+      name: "Webhook Verification Test Organization",
+    },
+  });
 });
 
 afterAll(async () => {
+  await app.db.webhookEvent.deleteMany({
+    where: {
+      organizationId,
+      provider: WEBHOOK_PROVIDER,
+      externalEventId: {
+        startsWith: malformedEventPrefix,
+      },
+    },
+  });
+
+  await app.db.organization.deleteMany({
+    where: {
+      id: organizationId,
+    },
+  });
+
   await app.close();
 });
 
@@ -223,13 +266,17 @@ describe("POST /webhooks/service-requests verification", () => {
     });
   });
 
-  it("rejects an authentic payload that violates the service-request contract", async () => {
+  it("retains authentic malformed service-request evidence without creating business state", async () => {
+    const externalEventId = `${malformedEventPrefix}contract-001`;
+
+    const externalRequestId = "request-malformed-evidence-001";
+
     const rawBody = JSON.stringify({
-      organizationId: "00000001-0000-4000-8000-000000000001",
-      eventId: "evt-invalid-contract-001",
+      organizationId,
+      eventId: externalEventId,
       type: "service_request.created",
       data: {
-        externalId: "request-invalid-contract-001",
+        externalId: externalRequestId,
         requiredSkillId: "00000003-0000-4000-8000-000000000004",
         priority: "URGENT",
         region: "WEST",
@@ -249,6 +296,92 @@ describe("POST /webhooks/service-requests verification", () => {
       code: "WEBHOOK_PAYLOAD_INVALID",
       message: "Webhook payload is invalid",
     });
+
+    const webhookEvents = await app.db.webhookEvent.findMany({
+      where: {
+        organizationId,
+        provider: WEBHOOK_PROVIDER,
+        externalEventId,
+      },
+    });
+
+    expect(webhookEvents).toHaveLength(1);
+
+    const [webhookEvent] = webhookEvents;
+
+    if (!webhookEvent) {
+      throw new Error("Expected malformed webhook evidence to be persisted");
+    }
+
+    expect(webhookEvent.status).toBe("MALFORMED");
+    expect(webhookEvent.serviceRequestId).toBeNull();
+    expect(webhookEvent.malformedReason).toBe(
+      "SERVICE_REQUEST_CONTRACT_INVALID",
+    );
+
+    expect(
+      Buffer.from(webhookEvent.rawBody).equals(Buffer.from(rawBody, "utf8")),
+    ).toBe(true);
+
+    expect(webhookEvent.parsedPayload).toEqual({
+      organizationId,
+      eventId: externalEventId,
+      type: "service_request.created",
+      data: {
+        externalId: externalRequestId,
+        requiredSkillId: "00000003-0000-4000-8000-000000000004",
+        priority: "URGENT",
+        region: "WEST",
+      },
+    });
+
+    const serviceRequest = await app.db.serviceRequest.findFirst({
+      where: {
+        organizationId,
+        externalId: externalRequestId,
+      },
+    });
+
+    expect(serviceRequest).toBeNull();
+  });
+
+  it("does not falsely attribute malformed evidence to an unknown organization", async () => {
+    const externalEventId = `${malformedEventPrefix}unknown-organization-001`;
+
+    const rawBody = JSON.stringify({
+      organizationId: unknownOrganizationId,
+      eventId: externalEventId,
+      type: "service_request.created",
+      data: {
+        externalId: "request-unknown-organization-001",
+        requiredSkillId: "00000003-0000-4000-8000-000000000004",
+        priority: "URGENT",
+        region: "WEST",
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/webhooks/service-requests",
+      headers: signedHeaders(rawBody),
+      payload: rawBody,
+    });
+
+    expect(response.statusCode).toBe(400);
+
+    expect(response.json()).toMatchObject({
+      code: "WEBHOOK_PAYLOAD_INVALID",
+      message: "Webhook payload is invalid",
+    });
+
+    const webhookEvent = await app.db.webhookEvent.findFirst({
+      where: {
+        provider: WEBHOOK_PROVIDER,
+        externalEventId,
+      },
+    });
+
+    expect(webhookEvent).toBeNull();
   });
 
   it("rejects non-JSON content types safely", async () => {
