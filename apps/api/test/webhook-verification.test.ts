@@ -29,6 +29,8 @@ const organizationId = "10000001-0000-4000-8000-000000000001";
 
 const unknownOrganizationId = "10000002-0000-4000-8000-000000000002";
 
+const requiredSkillId = "10000003-0000-4000-8000-000000000003";
+
 const malformedEventPrefix = "evt-malformed-evidence-";
 
 const app = buildApp({
@@ -48,7 +50,7 @@ function validPayload(): string {
     type: "service_request.created",
     data: {
       externalId: "request-verification-001",
-      requiredSkillId: "00000003-0000-4000-8000-000000000004",
+      requiredSkillId,
       priority: "HIGH",
       region: "WEST",
     },
@@ -74,38 +76,34 @@ function signedHeaders(
   };
 }
 
-beforeAll(async () => {
-  await app.ready();
-
-  await app.db.webhookEvent.deleteMany({
+async function clearTestOrganizationData(): Promise<void> {
+  await app.db.auditLog.deleteMany({
     where: {
-      provider: WEBHOOK_PROVIDER,
-      externalEventId: {
-        startsWith: malformedEventPrefix,
-      },
+      organizationId,
     },
   });
 
-  await app.db.organization.upsert({
+  await app.db.outboxEvent.deleteMany({
     where: {
-      id: organizationId,
-    },
-    update: {},
-    create: {
-      id: organizationId,
-      name: "Webhook Verification Test Organization",
+      organizationId,
     },
   });
-});
 
-afterAll(async () => {
   await app.db.webhookEvent.deleteMany({
     where: {
       organizationId,
-      provider: WEBHOOK_PROVIDER,
-      externalEventId: {
-        startsWith: malformedEventPrefix,
-      },
+    },
+  });
+
+  await app.db.serviceRequest.deleteMany({
+    where: {
+      organizationId,
+    },
+  });
+
+  await app.db.skill.deleteMany({
+    where: {
+      organizationId,
     },
   });
 
@@ -114,12 +112,37 @@ afterAll(async () => {
       id: organizationId,
     },
   });
+}
+
+beforeAll(async () => {
+  await app.ready();
+
+  await clearTestOrganizationData();
+
+  await app.db.organization.create({
+    data: {
+      id: organizationId,
+      name: "Webhook Verification Test Organization",
+    },
+  });
+
+  await app.db.skill.create({
+    data: {
+      id: requiredSkillId,
+      organizationId,
+      name: "Webhook Verification Test Skill",
+    },
+  });
+});
+
+afterAll(async () => {
+  await clearTestOrganizationData();
 
   await app.close();
 });
 
 describe("POST /webhooks/service-requests verification", () => {
-  it("accepts authentication and contract validation before persistence", async () => {
+  it("persists a valid authenticated webhook atomically", async () => {
     const rawBody = validPayload();
 
     const response = await app.inject({
@@ -129,11 +152,120 @@ describe("POST /webhooks/service-requests verification", () => {
       payload: rawBody,
     });
 
-    expect(response.statusCode).toBe(501);
+    expect(response.statusCode).toBe(202);
 
-    expect(response.json()).toMatchObject({
-      code: "WEBHOOK_PERSISTENCE_NOT_IMPLEMENTED",
-      message: "Webhook persistence is not implemented yet",
+    const responseBody = response.json();
+
+    expect(responseBody).toMatchObject({
+      status: "accepted",
+    });
+
+    expect(responseBody.requestId).toEqual(expect.any(String));
+
+    expect(responseBody.serviceRequestId).toEqual(expect.any(String));
+
+    const serviceRequestId = responseBody.serviceRequestId as string;
+
+    const serviceRequests = await app.db.serviceRequest.findMany({
+      where: {
+        organizationId,
+        externalId: "request-verification-001",
+      },
+    });
+
+    expect(serviceRequests).toHaveLength(1);
+
+    const [serviceRequest] = serviceRequests;
+
+    if (!serviceRequest) {
+      throw new Error("Expected accepted ServiceRequest to exist");
+    }
+
+    expect(serviceRequest.id).toBe(serviceRequestId);
+    expect(serviceRequest.requiredSkillId).toBe(requiredSkillId);
+    expect(serviceRequest.status).toBe("PENDING");
+    expect(serviceRequest.priority).toBe("HIGH");
+    expect(serviceRequest.region).toBe("WEST");
+
+    const webhookEvents = await app.db.webhookEvent.findMany({
+      where: {
+        organizationId,
+        provider: WEBHOOK_PROVIDER,
+        externalEventId: "evt-verification-001",
+      },
+    });
+
+    expect(webhookEvents).toHaveLength(1);
+
+    const [webhookEvent] = webhookEvents;
+
+    if (!webhookEvent) {
+      throw new Error("Expected accepted WebhookEvent to exist");
+    }
+
+    expect(webhookEvent.status).toBe("PROCESSED");
+    expect(webhookEvent.serviceRequestId).toBe(serviceRequestId);
+    expect(webhookEvent.malformedReason).toBeNull();
+
+    expect(
+      Buffer.from(webhookEvent.rawBody).equals(Buffer.from(rawBody, "utf8")),
+    ).toBe(true);
+
+    expect(webhookEvent.parsedPayload).toEqual(JSON.parse(rawBody));
+
+    const outboxEvents = await app.db.outboxEvent.findMany({
+      where: {
+        organizationId,
+        aggregateType: "service_request",
+        aggregateId: serviceRequestId,
+      },
+    });
+
+    expect(outboxEvents).toHaveLength(1);
+
+    const [outboxEvent] = outboxEvents;
+
+    if (!outboxEvent) {
+      throw new Error("Expected accepted OutboxEvent to exist");
+    }
+
+    expect(outboxEvent.eventType).toBe("service_request.created");
+    expect(outboxEvent.status).toBe("PENDING");
+
+    expect(outboxEvent.payload).toEqual({
+      serviceRequestId,
+      externalId: "request-verification-001",
+      requiredSkillId,
+      priority: "HIGH",
+      region: "WEST",
+    });
+
+    const auditLogs = await app.db.auditLog.findMany({
+      where: {
+        organizationId,
+        action: "service_request.ingested",
+        entityType: "service_request",
+        entityId: serviceRequestId,
+      },
+    });
+
+    expect(auditLogs).toHaveLength(1);
+
+    const [auditLog] = auditLogs;
+
+    if (!auditLog) {
+      throw new Error("Expected accepted AuditLog to exist");
+    }
+
+    expect(auditLog.actorType).toBe("SYSTEM");
+    expect(auditLog.actorUserId).toBeNull();
+    expect(auditLog.correlationId).toBe(responseBody.requestId);
+
+    expect(auditLog.metadata).toEqual({
+      provider: WEBHOOK_PROVIDER,
+      externalEventId: "evt-verification-001",
+      webhookEventId: webhookEvent.id,
+      outboxEventId: outboxEvent.id,
     });
   });
 
