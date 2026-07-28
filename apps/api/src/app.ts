@@ -26,6 +26,8 @@ export function buildApp(config: AppConfig): FastifyInstance {
 
   app.register(webhookRoutes, {
     prefix: "/webhooks",
+    webhookSecret: config.webhookSecret,
+    webhookToleranceSeconds: config.webhookToleranceSeconds,
   });
 
   return app;

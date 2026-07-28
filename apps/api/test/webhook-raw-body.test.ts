@@ -197,7 +197,7 @@ afterAll(async () => {
 });
 
 describe("POST /webhooks/service-requests raw-body integration", () => {
-  it("captures the webhook body before ingestion is implemented", async () => {
+  it("rejects an unsigned webhook after raw-body capture", async () => {
     const response = await integratedApp.inject({
       method: "POST",
       url: "/webhooks/service-requests",
@@ -207,11 +207,11 @@ describe("POST /webhooks/service-requests raw-body integration", () => {
       payload: '{ "externalId": "raw-body-proof" }',
     });
 
-    expect(response.statusCode).toBe(501);
+    expect(response.statusCode).toBe(401);
 
     expect(response.json()).toMatchObject({
-      code: "WEBHOOK_NOT_IMPLEMENTED",
-      message: "Webhook ingestion is not implemented yet",
+      code: "WEBHOOK_AUTHENTICATION_FAILED",
+      message: "Webhook authentication failed",
     });
   });
 });
