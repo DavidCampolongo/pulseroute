@@ -367,6 +367,137 @@ describe("POST /webhooks/service-requests verification", () => {
     expect(auditLogs).toHaveLength(1);
   });
 
+  it("handles 20 concurrent duplicate deliveries with exactly one accepted state", async () => {
+    const externalEventId = "evt-concurrent-duplicate-001";
+    const externalRequestId = "request-concurrent-duplicate-001";
+
+    const rawBody = validPayload({
+      eventId: externalEventId,
+      externalId: externalRequestId,
+    });
+
+    const timestamp = String(Math.floor(Date.now() / 1000));
+
+    const headers = signedHeaders(rawBody, timestamp);
+
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        app.inject({
+          method: "POST",
+          url: "/webhooks/service-requests",
+          headers: {
+            ...headers,
+          },
+          payload: rawBody,
+        }),
+      ),
+    );
+
+    const acceptedResponses = responses.filter(
+      (response) => response.statusCode === 202,
+    );
+
+    const duplicateResponses = responses.filter(
+      (response) => response.statusCode === 200,
+    );
+
+    expect(acceptedResponses).toHaveLength(1);
+    expect(duplicateResponses).toHaveLength(19);
+
+    const responseBodies = responses.map((response) => response.json());
+
+    for (const responseBody of responseBodies) {
+      expect(responseBody.requestId).toEqual(expect.any(String));
+
+      expect(responseBody.serviceRequestId).toEqual(expect.any(String));
+    }
+
+    const acceptedBodies = responseBodies.filter(
+      (responseBody) => responseBody.status === "accepted",
+    );
+
+    const duplicateBodies = responseBodies.filter(
+      (responseBody) => responseBody.status === "duplicate",
+    );
+
+    expect(acceptedBodies).toHaveLength(1);
+    expect(duplicateBodies).toHaveLength(19);
+
+    const serviceRequestIds = new Set(
+      responseBodies.map(
+        (responseBody) => responseBody.serviceRequestId as string,
+      ),
+    );
+
+    expect(serviceRequestIds.size).toBe(1);
+
+    const serviceRequests = await app.db.serviceRequest.findMany({
+      where: {
+        organizationId,
+        externalId: externalRequestId,
+      },
+    });
+
+    expect(serviceRequests).toHaveLength(1);
+
+    const [serviceRequest] = serviceRequests;
+
+    if (!serviceRequest) {
+      throw new Error("Expected concurrent duplicate ServiceRequest to exist");
+    }
+
+    expect(serviceRequestIds.has(serviceRequest.id)).toBe(true);
+    expect(serviceRequest.status).toBe("PENDING");
+
+    const webhookEvents = await app.db.webhookEvent.findMany({
+      where: {
+        organizationId,
+        provider: WEBHOOK_PROVIDER,
+        externalEventId,
+      },
+    });
+
+    expect(webhookEvents).toHaveLength(1);
+
+    const [webhookEvent] = webhookEvents;
+
+    if (!webhookEvent) {
+      throw new Error("Expected concurrent duplicate WebhookEvent to exist");
+    }
+
+    expect(webhookEvent.status).toBe("PROCESSED");
+    expect(webhookEvent.serviceRequestId).toBe(serviceRequest.id);
+
+    const outboxEvents = await app.db.outboxEvent.findMany({
+      where: {
+        organizationId,
+        aggregateType: "service_request",
+        aggregateId: serviceRequest.id,
+      },
+    });
+
+    expect(outboxEvents).toHaveLength(1);
+
+    const [outboxEvent] = outboxEvents;
+
+    if (!outboxEvent) {
+      throw new Error("Expected concurrent duplicate OutboxEvent to exist");
+    }
+
+    expect(outboxEvent.status).toBe("PENDING");
+
+    const auditLogs = await app.db.auditLog.findMany({
+      where: {
+        organizationId,
+        action: "service_request.ingested",
+        entityType: "service_request",
+        entityId: serviceRequest.id,
+      },
+    });
+
+    expect(auditLogs).toHaveLength(1);
+  });
+
   it("rejects a missing signature", async () => {
     const rawBody = validPayload();
     const timestamp = String(Math.floor(Date.now() / 1000));
