@@ -1,6 +1,6 @@
 import { isUtf8 } from "node:buffer";
 
-import type { Prisma } from "@pulseroute/db";
+import { Prisma } from "@pulseroute/db";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 
 import { AppError } from "../errors.js";
@@ -20,6 +20,25 @@ type WebhookRouteOptions = {
   webhookSecret: string;
   webhookToleranceSeconds: number;
 };
+
+class DuplicateServiceRequestError extends Error {
+  readonly databaseError: Prisma.PrismaClientKnownRequestError;
+
+  constructor(databaseError: Prisma.PrismaClientKnownRequestError) {
+    super("Service request already exists");
+    this.name = "DuplicateServiceRequestError";
+    this.databaseError = databaseError;
+  }
+}
+
+function isUniqueConstraintError(
+  error: unknown,
+): error is Prisma.PrismaClientKnownRequestError {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  );
+}
 
 function readHeader(
   request: FastifyRequest,
@@ -75,7 +94,7 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
       secret: options.webhookSecret,
       timestamp,
       signature,
-      rawBody: rawBody,
+      rawBody,
       toleranceSeconds: options.webhookToleranceSeconds,
       nowSeconds: Math.floor(Date.now() / 1000),
     });
@@ -206,61 +225,105 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
       payloadResult.data,
     );
 
-    const accepted = await app.db.$transaction(async (transaction) => {
-      const serviceRequest = await transaction.serviceRequest.create({
-        data: serviceRequestValues,
-        select: {
-          id: true,
-        },
-      });
+    let accepted: {
+      serviceRequestId: string;
+      webhookEventId: string;
+      outboxEventId: string;
+      auditLogId: string;
+    };
 
-      const webhookEvent = await transaction.webhookEvent.create({
-        data: {
-          organizationId: payloadResult.data.organizationId,
-          serviceRequestId: serviceRequest.id,
-          provider: WEBHOOK_PROVIDER,
-          externalEventId: payloadResult.data.eventId,
-          status: "PROCESSED",
-          rawBody: Uint8Array.from(rawBody),
-          parsedPayload: payloadResult.data as Prisma.InputJsonValue,
-        },
-        select: {
-          id: true,
-        },
-      });
+    try {
+      accepted = await app.db.$transaction(async (transaction) => {
+        let serviceRequest: {
+          id: string;
+        };
 
-      const outboxEvent = await transaction.outboxEvent.create({
-        data: {
-          organizationId: payloadResult.data.organizationId,
-          eventType: SERVICE_REQUEST_EVENT_TYPE,
-          aggregateType: "service_request",
-          aggregateId: serviceRequest.id,
-          payload: {
+        try {
+          serviceRequest = await transaction.serviceRequest.create({
+            data: serviceRequestValues,
+            select: {
+              id: true,
+            },
+          });
+        } catch (error) {
+          if (isUniqueConstraintError(error)) {
+            throw new DuplicateServiceRequestError(error);
+          }
+
+          throw error;
+        }
+
+        const webhookEvent = await transaction.webhookEvent.create({
+          data: {
+            organizationId: payloadResult.data.organizationId,
             serviceRequestId: serviceRequest.id,
-            externalId: payloadResult.data.data.externalId,
-            requiredSkillId: payloadResult.data.data.requiredSkillId,
-            priority: payloadResult.data.data.priority,
-            region: payloadResult.data.data.region,
-          },
-        },
-        select: {
-          id: true,
-        },
-      });
-
-      const auditLog = await transaction.auditLog.create({
-        data: {
-          organizationId: payloadResult.data.organizationId,
-          actorType: "SYSTEM",
-          action: "service_request.ingested",
-          entityType: "service_request",
-          entityId: serviceRequest.id,
-          correlationId: request.id,
-          metadata: {
             provider: WEBHOOK_PROVIDER,
             externalEventId: payloadResult.data.eventId,
-            webhookEventId: webhookEvent.id,
-            outboxEventId: outboxEvent.id,
+            status: "PROCESSED",
+            rawBody: Uint8Array.from(rawBody),
+            parsedPayload: payloadResult.data as Prisma.InputJsonValue,
+          },
+          select: {
+            id: true,
+          },
+        });
+
+        const outboxEvent = await transaction.outboxEvent.create({
+          data: {
+            organizationId: payloadResult.data.organizationId,
+            eventType: SERVICE_REQUEST_EVENT_TYPE,
+            aggregateType: "service_request",
+            aggregateId: serviceRequest.id,
+            payload: {
+              serviceRequestId: serviceRequest.id,
+              externalId: payloadResult.data.data.externalId,
+              requiredSkillId: payloadResult.data.data.requiredSkillId,
+              priority: payloadResult.data.data.priority,
+              region: payloadResult.data.data.region,
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
+
+        const auditLog = await transaction.auditLog.create({
+          data: {
+            organizationId: payloadResult.data.organizationId,
+            actorType: "SYSTEM",
+            action: "service_request.ingested",
+            entityType: "service_request",
+            entityId: serviceRequest.id,
+            correlationId: request.id,
+            metadata: {
+              provider: WEBHOOK_PROVIDER,
+              externalEventId: payloadResult.data.eventId,
+              webhookEventId: webhookEvent.id,
+              outboxEventId: outboxEvent.id,
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
+
+        return {
+          serviceRequestId: serviceRequest.id,
+          webhookEventId: webhookEvent.id,
+          outboxEventId: outboxEvent.id,
+          auditLogId: auditLog.id,
+        };
+      });
+    } catch (error) {
+      if (!(error instanceof DuplicateServiceRequestError)) {
+        throw error;
+      }
+
+      const existingServiceRequest = await app.db.serviceRequest.findUnique({
+        where: {
+          organizationId_externalId: {
+            organizationId: serviceRequestValues.organizationId,
+            externalId: serviceRequestValues.externalId,
           },
         },
         select: {
@@ -268,13 +331,29 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
         },
       });
 
-      return {
-        serviceRequestId: serviceRequest.id,
-        webhookEventId: webhookEvent.id,
-        outboxEventId: outboxEvent.id,
-        auditLogId: auditLog.id,
-      };
-    });
+      if (!existingServiceRequest) {
+        throw error.databaseError;
+      }
+
+      request.log.info(
+        {
+          provider: WEBHOOK_PROVIDER,
+          webhookVerificationOutcome: "verified",
+          ingestionStatus: "duplicate",
+          organizationId: payloadResult.data.organizationId,
+          externalEventId: payloadResult.data.eventId,
+          externalRequestId: payloadResult.data.data.externalId,
+          serviceRequestId: existingServiceRequest.id,
+        },
+        "Webhook replay treated as duplicate success",
+      );
+
+      return reply.code(200).send({
+        requestId: request.id,
+        status: "duplicate",
+        serviceRequestId: existingServiceRequest.id,
+      });
+    }
 
     request.log.info(
       {

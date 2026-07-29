@@ -43,13 +43,18 @@ const app = buildApp({
   webhookToleranceSeconds,
 });
 
-function validPayload(): string {
+function validPayload(
+  options: {
+    eventId?: string;
+    externalId?: string;
+  } = {},
+): string {
   return JSON.stringify({
     organizationId,
-    eventId: "evt-verification-001",
+    eventId: options.eventId ?? "evt-verification-001",
     type: "service_request.created",
     data: {
-      externalId: "request-verification-001",
+      externalId: options.externalId ?? "request-verification-001",
       requiredSkillId,
       priority: "HIGH",
       region: "WEST",
@@ -269,6 +274,99 @@ describe("POST /webhooks/service-requests verification", () => {
     });
   });
 
+  it("treats a sequential replay as successful without creating duplicate state", async () => {
+    const externalEventId = "evt-duplicate-replay-001";
+    const externalRequestId = "request-duplicate-replay-001";
+
+    const rawBody = validPayload({
+      eventId: externalEventId,
+      externalId: externalRequestId,
+    });
+
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: "/webhooks/service-requests",
+      headers: signedHeaders(rawBody),
+      payload: rawBody,
+    });
+
+    expect(firstResponse.statusCode).toBe(202);
+
+    const firstBody = firstResponse.json();
+
+    expect(firstBody).toMatchObject({
+      status: "accepted",
+    });
+
+    expect(firstBody.serviceRequestId).toEqual(expect.any(String));
+
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: "/webhooks/service-requests",
+      headers: signedHeaders(rawBody),
+      payload: rawBody,
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+
+    const secondBody = secondResponse.json();
+
+    expect(secondBody).toMatchObject({
+      status: "duplicate",
+      serviceRequestId: firstBody.serviceRequestId,
+    });
+
+    expect(secondBody.requestId).toEqual(expect.any(String));
+
+    const serviceRequests = await app.db.serviceRequest.findMany({
+      where: {
+        organizationId,
+        externalId: externalRequestId,
+      },
+    });
+
+    expect(serviceRequests).toHaveLength(1);
+
+    const [serviceRequest] = serviceRequests;
+
+    if (!serviceRequest) {
+      throw new Error("Expected duplicate replay ServiceRequest to exist");
+    }
+
+    expect(serviceRequest.id).toBe(firstBody.serviceRequestId);
+
+    const webhookEvents = await app.db.webhookEvent.findMany({
+      where: {
+        organizationId,
+        provider: WEBHOOK_PROVIDER,
+        externalEventId,
+      },
+    });
+
+    expect(webhookEvents).toHaveLength(1);
+
+    const outboxEvents = await app.db.outboxEvent.findMany({
+      where: {
+        organizationId,
+        aggregateType: "service_request",
+        aggregateId: serviceRequest.id,
+      },
+    });
+
+    expect(outboxEvents).toHaveLength(1);
+
+    const auditLogs = await app.db.auditLog.findMany({
+      where: {
+        organizationId,
+        action: "service_request.ingested",
+        entityType: "service_request",
+        entityId: serviceRequest.id,
+      },
+    });
+
+    expect(auditLogs).toHaveLength(1);
+  });
+
   it("rejects a missing signature", async () => {
     const rawBody = validPayload();
     const timestamp = String(Math.floor(Date.now() / 1000));
@@ -409,7 +507,7 @@ describe("POST /webhooks/service-requests verification", () => {
       type: "service_request.created",
       data: {
         externalId: externalRequestId,
-        requiredSkillId: "00000003-0000-4000-8000-000000000004",
+        requiredSkillId,
         priority: "URGENT",
         region: "WEST",
       },
@@ -461,7 +559,7 @@ describe("POST /webhooks/service-requests verification", () => {
       type: "service_request.created",
       data: {
         externalId: externalRequestId,
-        requiredSkillId: "00000003-0000-4000-8000-000000000004",
+        requiredSkillId,
         priority: "URGENT",
         region: "WEST",
       },
@@ -486,7 +584,7 @@ describe("POST /webhooks/service-requests verification", () => {
       type: "service_request.created",
       data: {
         externalId: "request-unknown-organization-001",
-        requiredSkillId: "00000003-0000-4000-8000-000000000004",
+        requiredSkillId,
         priority: "URGENT",
         region: "WEST",
       },
