@@ -1,14 +1,9 @@
+import { createHmac } from "node:crypto";
 import { config as loadEnvironmentFile } from "dotenv";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import {
-  WEBHOOK_PROVIDER,
-  WEBHOOK_SIGNATURE_HEADER,
-  WEBHOOK_TIMESTAMP_HEADER,
-} from "../src/webhooks/contract.js";
-import { createWebhookSignature } from "../src/webhooks/signature.js";
 
 loadEnvironmentFile({
   path: fileURLToPath(new URL("../../../.env", import.meta.url)),
@@ -25,6 +20,12 @@ const webhookSecret = "test-webhook-secret-at-least-32-characters";
 
 const webhookToleranceSeconds = 300;
 
+const webhookTimestampHeader = "x-pulseroute-timestamp";
+
+const webhookSignatureHeader = "x-pulseroute-signature";
+
+const webhookProvider = "pulseroute";
+
 const organizationId = "10000001-0000-4000-8000-000000000001";
 
 const unknownOrganizationId = "10000002-0000-4000-8000-000000000002";
@@ -32,6 +33,8 @@ const unknownOrganizationId = "10000002-0000-4000-8000-000000000002";
 const requiredSkillId = "10000003-0000-4000-8000-000000000003";
 
 const malformedEventPrefix = "evt-malformed-evidence-";
+
+const rollbackExternalRequestId = "request-rollback-injection-001";
 
 const app = buildApp({
   nodeEnv: "test",
@@ -62,6 +65,21 @@ function validPayload(
   });
 }
 
+function createIndependentWebhookSignature(
+  rawBody: string | Buffer,
+  timestamp: string,
+): string {
+  const bodyBytes = Buffer.isBuffer(rawBody)
+    ? rawBody
+    : Buffer.from(rawBody, "utf8");
+
+  return createHmac("sha256", webhookSecret)
+    .update(timestamp, "utf8")
+    .update(".", "utf8")
+    .update(bodyBytes)
+    .digest("hex");
+}
+
 function signedHeaders(
   rawBody: string | Buffer,
   timestamp = String(Math.floor(Date.now() / 1000)),
@@ -69,16 +87,33 @@ function signedHeaders(
   return {
     "content-type": "application/json",
 
-    [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
+    [webhookTimestampHeader]: timestamp,
 
-    [WEBHOOK_SIGNATURE_HEADER]: createWebhookSignature({
-      secret: webhookSecret,
+    [webhookSignatureHeader]: createIndependentWebhookSignature(
+      rawBody,
       timestamp,
-      rawBody: Buffer.isBuffer(rawBody)
-        ? rawBody
-        : Buffer.from(rawBody, "utf8"),
-    }),
+    ),
   };
+}
+
+async function removeRollbackConstraint(): Promise<void> {
+  await app.db.$executeRaw`
+    ALTER TABLE "outbox_events"
+    DROP CONSTRAINT IF EXISTS "outbox_test_rollback_failure"
+  `;
+}
+
+async function installRollbackConstraint(): Promise<void> {
+  await removeRollbackConstraint();
+
+  await app.db.$executeRaw`
+    ALTER TABLE "outbox_events"
+    ADD CONSTRAINT "outbox_test_rollback_failure"
+    CHECK (
+      (payload ->> 'externalId')
+      IS DISTINCT FROM 'request-rollback-injection-001'
+    )
+  `;
 }
 
 async function clearTestOrganizationData(): Promise<void> {
@@ -122,6 +157,8 @@ async function clearTestOrganizationData(): Promise<void> {
 beforeAll(async () => {
   await app.ready();
 
+  await removeRollbackConstraint();
+
   await clearTestOrganizationData();
 
   await app.db.organization.create({
@@ -141,6 +178,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await removeRollbackConstraint();
+
   await clearTestOrganizationData();
 
   await app.close();
@@ -195,7 +234,7 @@ describe("POST /webhooks/service-requests verification", () => {
     const webhookEvents = await app.db.webhookEvent.findMany({
       where: {
         organizationId,
-        provider: WEBHOOK_PROVIDER,
+        provider: webhookProvider,
         externalEventId: "evt-verification-001",
       },
     });
@@ -267,7 +306,7 @@ describe("POST /webhooks/service-requests verification", () => {
     expect(auditLog.correlationId).toBe(responseBody.requestId);
 
     expect(auditLog.metadata).toEqual({
-      provider: WEBHOOK_PROVIDER,
+      provider: webhookProvider,
       externalEventId: "evt-verification-001",
       webhookEventId: webhookEvent.id,
       outboxEventId: outboxEvent.id,
@@ -338,7 +377,7 @@ describe("POST /webhooks/service-requests verification", () => {
     const webhookEvents = await app.db.webhookEvent.findMany({
       where: {
         organizationId,
-        provider: WEBHOOK_PROVIDER,
+        provider: webhookProvider,
         externalEventId,
       },
     });
@@ -452,7 +491,7 @@ describe("POST /webhooks/service-requests verification", () => {
     const webhookEvents = await app.db.webhookEvent.findMany({
       where: {
         organizationId,
-        provider: WEBHOOK_PROVIDER,
+        provider: webhookProvider,
         externalEventId,
       },
     });
@@ -498,6 +537,111 @@ describe("POST /webhooks/service-requests verification", () => {
     expect(auditLogs).toHaveLength(1);
   });
 
+  it("rolls back all accepted state when the outbox insert fails", async () => {
+    const externalEventId = "evt-rollback-injection-001";
+
+    const rawBody = validPayload({
+      eventId: externalEventId,
+      externalId: rollbackExternalRequestId,
+    });
+
+    const before = {
+      serviceRequests: await app.db.serviceRequest.count({
+        where: {
+          organizationId,
+        },
+      }),
+
+      webhookEvents: await app.db.webhookEvent.count({
+        where: {
+          organizationId,
+        },
+      }),
+
+      outboxEvents: await app.db.outboxEvent.count({
+        where: {
+          organizationId,
+        },
+      }),
+
+      auditLogs: await app.db.auditLog.count({
+        where: {
+          organizationId,
+        },
+      }),
+    };
+
+    await installRollbackConstraint();
+
+    const response = await (async () => {
+      try {
+        return await app.inject({
+          method: "POST",
+          url: "/webhooks/service-requests",
+          headers: signedHeaders(rawBody),
+          payload: rawBody,
+        });
+      } finally {
+        await removeRollbackConstraint();
+      }
+    })();
+
+    expect(response.statusCode).toBe(500);
+
+    expect(response.json()).toMatchObject({
+      code: "INTERNAL_ERROR",
+    });
+
+    const serviceRequest = await app.db.serviceRequest.findUnique({
+      where: {
+        organizationId_externalId: {
+          organizationId,
+          externalId: rollbackExternalRequestId,
+        },
+      },
+    });
+
+    expect(serviceRequest).toBeNull();
+
+    const webhookEvent = await app.db.webhookEvent.findFirst({
+      where: {
+        organizationId,
+        provider: webhookProvider,
+        externalEventId,
+      },
+    });
+
+    expect(webhookEvent).toBeNull();
+
+    const after = {
+      serviceRequests: await app.db.serviceRequest.count({
+        where: {
+          organizationId,
+        },
+      }),
+
+      webhookEvents: await app.db.webhookEvent.count({
+        where: {
+          organizationId,
+        },
+      }),
+
+      outboxEvents: await app.db.outboxEvent.count({
+        where: {
+          organizationId,
+        },
+      }),
+
+      auditLogs: await app.db.auditLog.count({
+        where: {
+          organizationId,
+        },
+      }),
+    };
+
+    expect(after).toEqual(before);
+  });
+
   it("rejects a missing signature", async () => {
     const rawBody = validPayload();
     const timestamp = String(Math.floor(Date.now() / 1000));
@@ -507,7 +651,7 @@ describe("POST /webhooks/service-requests verification", () => {
       url: "/webhooks/service-requests",
       headers: {
         "content-type": "application/json",
-        [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
+        [webhookTimestampHeader]: timestamp,
       },
       payload: rawBody,
     });
@@ -528,8 +672,8 @@ describe("POST /webhooks/service-requests verification", () => {
       url: "/webhooks/service-requests",
       headers: {
         "content-type": "application/json",
-        [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
-        [WEBHOOK_SIGNATURE_HEADER]: "ab".repeat(31),
+        [webhookTimestampHeader]: timestamp,
+        [webhookSignatureHeader]: "ab".repeat(31),
       },
       payload: rawBody,
     });
@@ -661,7 +805,7 @@ describe("POST /webhooks/service-requests verification", () => {
     const webhookEvents = await app.db.webhookEvent.findMany({
       where: {
         organizationId,
-        provider: WEBHOOK_PROVIDER,
+        provider: webhookProvider,
         externalEventId,
       },
     });
@@ -737,7 +881,7 @@ describe("POST /webhooks/service-requests verification", () => {
 
     const webhookEvent = await app.db.webhookEvent.findFirst({
       where: {
-        provider: WEBHOOK_PROVIDER,
+        provider: webhookProvider,
         externalEventId,
       },
     });
