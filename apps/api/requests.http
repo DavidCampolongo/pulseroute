@@ -9,3 +9,39 @@ GET http://127.0.0.1:3000/docs/
 
 ### Unknown route
 GET http://127.0.0.1:3000/does-not-exist
+
+### Unsigned webhook — expected 401
+POST http://127.0.0.1:3000/webhooks/service-requests
+Content-Type: application/json
+
+{
+  "organizationId": "00000001-0000-4000-8000-000000000001",
+  "eventId": "evt-unsigned-example-001",
+  "type": "service_request.created",
+  "data": {
+    "externalId": "request-unsigned-example-001",
+    "requiredSkillId": "00000003-0000-4000-8000-000000000004",
+    "priority": "HIGH",
+    "region": "WEST"
+  }
+}
+
+### Unsupported webhook content type — expected 415
+POST http://127.0.0.1:3000/webhooks/service-requests
+Content-Type: text/plain
+
+not-json
+
+### Signed webhook
+# Never put WEBHOOK_SECRET in this tracked file.
+#
+# With the API running, send a real signed request from the repository root:
+#
+# node apps/api/scripts/send-webhook.mjs \
+#   <organization-id> \
+#   <required-skill-id> \
+#   [external-request-id] \
+#   [external-event-id]
+#
+# Re-run the exact same command with explicit IDs to observe
+# the 200 duplicate-success behavior.

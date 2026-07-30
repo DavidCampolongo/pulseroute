@@ -29,6 +29,13 @@ export const serviceRequestWebhookSchema = z.strictObject({
   data: serviceRequestDataSchema,
 });
 
+export const serviceRequestWebhookOpenApiSchema = z.toJSONSchema(
+  serviceRequestWebhookSchema,
+  {
+    target: "openapi-3.0",
+  },
+);
+
 export const webhookEvidenceIdentitySchema = z.looseObject({
   organizationId: z.uuid(),
 
