@@ -10,3 +10,7 @@ allowBuilds:
   argon2: true
   esbuild: true
   prisma: true
+
+overrides:
+  brace-expansion: "5.0.8"
+  "fast-uri@3": "3.1.4"
