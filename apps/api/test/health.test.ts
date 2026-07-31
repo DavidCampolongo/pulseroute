@@ -21,6 +21,8 @@ const app = buildApp({
   port: 3000,
   databaseUrl,
   logLevel: "silent",
+  webhookSecret: "test-webhook-secret-at-least-32-characters",
+  webhookToleranceSeconds: 300,
 });
 
 beforeAll(async () => {

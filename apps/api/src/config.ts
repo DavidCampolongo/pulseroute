@@ -34,6 +34,17 @@ const environmentSchema = z.object({
     "trace",
     "silent",
   ]),
+
+  WEBHOOK_SECRET: z
+    .string()
+    .min(32, "WEBHOOK_SECRET must be at least 32 characters"),
+
+  WEBHOOK_TOLERANCE_SECONDS: z.coerce
+    .number()
+    .int("WEBHOOK_TOLERANCE_SECONDS must be a whole number")
+    .min(1, "WEBHOOK_TOLERANCE_SECONDS must be at least 1")
+    .max(3600, "WEBHOOK_TOLERANCE_SECONDS must be at most 3600")
+    .default(300),
 });
 
 export type AppConfig = {
@@ -42,6 +53,8 @@ export type AppConfig = {
   port: number;
   databaseUrl: string;
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
+  webhookSecret: string;
+  webhookToleranceSeconds: number;
 };
 
 export function parseConfig(
@@ -70,5 +83,7 @@ export function parseConfig(
     port: result.data.API_PORT,
     databaseUrl: result.data.DATABASE_URL,
     logLevel: result.data.LOG_LEVEL,
+    webhookSecret: result.data.WEBHOOK_SECRET,
+    webhookToleranceSeconds: result.data.WEBHOOK_TOLERANCE_SECONDS,
   };
 }
