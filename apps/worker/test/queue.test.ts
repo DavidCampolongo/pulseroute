@@ -25,9 +25,12 @@ describe("PulseRoute queues", () => {
     const queues = createPulseRouteQueues(redisUrl);
 
     try {
+      await waitForPulseRouteQueues(queues);
+
       const names = queueList(queues).map((queue) => queue.name);
 
       expect(names).toHaveLength(5);
+
       expect(new Set(names)).toEqual(new Set(Object.values(QUEUE_NAMES)));
     } finally {
       await closePulseRouteQueues(queues);
@@ -38,6 +41,8 @@ describe("PulseRoute queues", () => {
     const queues = createPulseRouteQueues(redisUrl);
 
     try {
+      await waitForPulseRouteQueues(queues);
+
       expect(queues.incomingEvents.defaultJobOptions).toMatchObject({
         attempts: 3,
         backoff: {
@@ -91,6 +96,8 @@ describe("PulseRoute queues", () => {
       );
 
       for (const queue of queueList(queues)) {
+        expect(queue.opts.skipWaitingForReady).toBe(true);
+
         expect(queue.defaultJobOptions).not.toHaveProperty("priority");
       }
     } finally {

@@ -75,17 +75,20 @@ export function createPulseRouteQueues(redisUrl: string): PulseRouteQueues {
       QUEUE_NAMES.incomingEvents,
       {
         connection: createProducerRedisOptions(redisUrl),
+        skipWaitingForReady: true,
         defaultJobOptions: createRetryableJobOptions(),
       },
     ),
 
     routing: new Queue<RouteServiceRequestJobData>(QUEUE_NAMES.routing, {
       connection: createProducerRedisOptions(redisUrl),
+      skipWaitingForReady: true,
       defaultJobOptions: createRetryableJobOptions(),
     }),
 
     notifications: new Queue<Record<string, never>>(QUEUE_NAMES.notifications, {
       connection: createProducerRedisOptions(redisUrl),
+      skipWaitingForReady: true,
       defaultJobOptions: createFutureFacingJobOptions(),
     }),
 
@@ -93,12 +96,14 @@ export function createPulseRouteQueues(redisUrl: string): PulseRouteQueues {
       QUEUE_NAMES.webhookDelivery,
       {
         connection: createProducerRedisOptions(redisUrl),
+        skipWaitingForReady: true,
         defaultJobOptions: createFutureFacingJobOptions(),
       },
     ),
 
     deadLetter: new Queue<DeadLetteredJobData>(QUEUE_NAMES.deadLetter, {
       connection: createProducerRedisOptions(redisUrl),
+      skipWaitingForReady: true,
       defaultJobOptions: createDeadLetterJobOptions(),
     }),
   };

@@ -1,5 +1,11 @@
 export const PROJECT_NAME = "PulseRoute";
 
+export const EVENT_TYPES = {
+  serviceRequestCreated: "service_request.created",
+} as const;
+
+export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES];
+
 export const QUEUE_NAMES = {
   incomingEvents: "incoming-events",
   routing: "routing",

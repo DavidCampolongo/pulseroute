@@ -445,6 +445,7 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (
               aggregateId: serviceRequest.id,
               payload: {
                 serviceRequestId: serviceRequest.id,
+                correlationId: request.id,
                 externalId: payloadResult.data.data.externalId,
                 requiredSkillId: payloadResult.data.data.requiredSkillId,
                 priority: payloadResult.data.data.priority,

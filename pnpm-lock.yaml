@@ -413,6 +413,9 @@ importers:
       '@pulseroute/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@pulseroute/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       dotenv:
         specifier: 17.4.2
         version: 17.4.2
@@ -437,6 +440,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@pulseroute/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@pulseroute/shared':
         specifier: workspace:*
         version: link:../../packages/shared
