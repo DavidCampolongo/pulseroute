@@ -1,6 +1,7 @@
 import { config as loadEnvironmentFile } from "dotenv";
 
 import { parseWorkerConfig } from "./config.js";
+import { createWorkerLogger } from "./logger.js";
 
 loadEnvironmentFile({
   path: "../../.env",
@@ -8,8 +9,6 @@ loadEnvironmentFile({
 });
 
 const config = parseWorkerConfig(process.env);
+const logger = createWorkerLogger(config);
 
-console.log("PulseRoute worker configuration loaded", {
-  nodeEnv: config.nodeEnv,
-  logLevel: config.logLevel,
-});
+logger.info("Worker configuration loaded");
