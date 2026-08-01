@@ -39,7 +39,31 @@ type IncomingWorkerOptions = IncomingProcessorOptions & {
   deadLetterQueue: Queue<DeadLetteredJobData>;
 
   concurrency?: number;
+
+  /*
+   * Optional BullMQ lifecycle controls.
+   *
+   * Production uses BullMQ defaults. Tests can shorten these values to
+   * exercise stalled-job recovery without waiting for the normal visibility
+   * window.
+   */
+  lockDuration?: number;
+  stalledInterval?: number;
+  maxStalledCount?: number;
 };
+
+function validatePositiveInteger(
+  value: number | undefined,
+  optionName: string,
+): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${optionName} must be a positive integer`);
+  }
+}
 
 export function createRoutingJobId(serviceRequestId: string): string {
   return `route-${serviceRequestId}`;
@@ -146,9 +170,19 @@ export function createIncomingWorker(
 ): Worker<ServiceRequestIngestedJobData, IncomingProcessorResult, string> {
   const concurrency = options.concurrency ?? DEFAULT_INCOMING_CONCURRENCY;
 
-  if (!Number.isInteger(concurrency) || concurrency < 1) {
-    throw new Error("Incoming worker concurrency must be a positive integer");
-  }
+  validatePositiveInteger(concurrency, "Incoming worker concurrency");
+
+  validatePositiveInteger(options.lockDuration, "Incoming worker lockDuration");
+
+  validatePositiveInteger(
+    options.stalledInterval,
+    "Incoming worker stalledInterval",
+  );
+
+  validatePositiveInteger(
+    options.maxStalledCount,
+    "Incoming worker maxStalledCount",
+  );
 
   const processor = createDeadLetteringProcessor({
     sourceQueue: QUEUE_NAMES.incomingEvents,
@@ -168,5 +202,23 @@ export function createIncomingWorker(
     connection: createWorkerRedisOptions(options.redisUrl),
 
     concurrency,
+
+    ...(options.lockDuration === undefined
+      ? {}
+      : {
+          lockDuration: options.lockDuration,
+        }),
+
+    ...(options.stalledInterval === undefined
+      ? {}
+      : {
+          stalledInterval: options.stalledInterval,
+        }),
+
+    ...(options.maxStalledCount === undefined
+      ? {}
+      : {
+          maxStalledCount: options.maxStalledCount,
+        }),
   });
 }
