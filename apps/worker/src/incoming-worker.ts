@@ -2,6 +2,7 @@ import type { DatabaseClient } from "@pulseroute/db";
 import {
   JOB_NAMES,
   QUEUE_NAMES,
+  type DeadLetteredJobData,
   type RouteServiceRequestJobData,
   type ServiceRequestIngestedJobData,
 } from "@pulseroute/shared";
@@ -9,6 +10,7 @@ import { type Job, type Processor, type Queue, Worker } from "bullmq";
 import type { Logger } from "pino";
 import { z } from "zod";
 
+import { createDeadLetteringProcessor } from "./dead-letter.js";
 import { createJobLogger } from "./logger.js";
 import { createWorkerRedisOptions } from "./redis.js";
 
@@ -33,6 +35,9 @@ type IncomingProcessorOptions = {
 
 type IncomingWorkerOptions = IncomingProcessorOptions & {
   redisUrl: string;
+
+  deadLetterQueue: Queue<DeadLetteredJobData>;
+
   concurrency?: number;
 };
 
@@ -90,6 +95,7 @@ export function createIncomingProcessor(
         id: jobData.serviceRequestId,
         organizationId: jobData.organizationId,
       },
+
       select: {
         id: true,
         status: true,
@@ -104,7 +110,9 @@ export function createIncomingProcessor(
 
     const routingJobData: RouteServiceRequestJobData = {
       organizationId: jobData.organizationId,
+
       serviceRequestId: serviceRequest.id,
+
       correlationId: jobData.correlationId,
     };
 
@@ -142,12 +150,23 @@ export function createIncomingWorker(
     throw new Error("Incoming worker concurrency must be a positive integer");
   }
 
+  const processor = createDeadLetteringProcessor({
+    sourceQueue: QUEUE_NAMES.incomingEvents,
+
+    deadLetterQueue: options.deadLetterQueue,
+
+    processor: createIncomingProcessor(options),
+
+    logger: options.logger,
+  });
+
   return new Worker<
     ServiceRequestIngestedJobData,
     IncomingProcessorResult,
     string
-  >(QUEUE_NAMES.incomingEvents, createIncomingProcessor(options), {
+  >(QUEUE_NAMES.incomingEvents, processor, {
     connection: createWorkerRedisOptions(options.redisUrl),
+
     concurrency,
   });
 }

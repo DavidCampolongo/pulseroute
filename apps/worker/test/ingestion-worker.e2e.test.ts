@@ -258,6 +258,7 @@ beforeAll(async () => {
   incomingWorker = createIncomingWorker({
     database: app.db,
     routingQueue: queues.routing,
+    deadLetterQueue: queues.deadLetter,
     logger,
     redisUrl,
     concurrency: 1,
