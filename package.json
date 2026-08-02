@@ -6,7 +6,7 @@
   "main": "index.js",
   "scripts": {
     "build": "pnpm -r run build",
-    "pretypecheck": "pnpm --filter @pulseroute/db --filter @pulseroute/shared run build",
+    "pretypecheck": "pnpm --filter @pulseroute/db --filter @pulseroute/shared --filter @pulseroute/scoring run build",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "lint": "eslint .",

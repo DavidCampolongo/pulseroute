@@ -1,5 +1,8 @@
 import { createDatabaseClient, type DatabaseClient } from "@pulseroute/db";
-import type { ServiceRequestIngestedJobData } from "@pulseroute/shared";
+import type {
+  RouteServiceRequestJobData,
+  ServiceRequestIngestedJobData,
+} from "@pulseroute/shared";
 import type { Worker } from "bullmq";
 import type { Logger } from "pino";
 
@@ -8,6 +11,7 @@ import {
   createIncomingWorker,
   type IncomingProcessorResult,
 } from "./incoming-worker.js";
+import { createRoutingWorker } from "./routing-worker.js";
 import { InternalOutboxPublisher } from "./outbox-publisher.js";
 import {
   closePulseRouteQueues,
@@ -25,6 +29,11 @@ export type RuntimeIncomingWorker = Pick<
   "close"
 >;
 
+export type RuntimeRoutingWorker = Pick<
+  Worker<RouteServiceRequestJobData, unknown, string>,
+  "close"
+>;
+
 export type WorkerRuntimeOptions = {
   database: DatabaseClient;
   queues: PulseRouteQueues;
@@ -33,19 +42,13 @@ export type WorkerRuntimeOptions = {
   logger: Logger;
 };
 
-type SignalSource = {
-  once(signal: "SIGTERM" | "SIGINT", listener: () => void): unknown;
-
-  removeListener(signal: "SIGTERM" | "SIGINT", listener: () => void): unknown;
-};
-
 async function attemptStartupCleanup(
   logger: Logger,
   resource: string,
-  action: () => Promise<void>,
+  cleanup: () => Promise<void>,
 ): Promise<void> {
   try {
-    await action();
+    await cleanup();
   } catch (error) {
     logger.error(
       {
@@ -64,6 +67,7 @@ export class WorkerRuntime {
   private readonly publisher: RuntimePublisher;
   private readonly logger: Logger;
 
+  private routingWorker: RuntimeRoutingWorker | undefined;
   private started = false;
   private shutdownPromise: Promise<void> | undefined;
 
@@ -77,16 +81,16 @@ export class WorkerRuntime {
     });
   }
 
-  get isStarted(): boolean {
-    return this.started;
+  registerRoutingWorker(worker: RuntimeRoutingWorker): void {
+    this.routingWorker = worker;
   }
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.started) {
       return;
     }
 
-    this.publisher.start();
+    await this.publisher.start();
 
     this.started = true;
 
@@ -129,21 +133,9 @@ export class WorkerRuntime {
       );
     } catch (error) {
       shutdownErrors.push(error);
-
-      this.logger.error(
-        {
-          err: error,
-          reason,
-        },
-        "Failed to stop outbox publisher",
-      );
     }
 
     try {
-      /*
-       * Calling close() first marks the worker as closing. It stops accepting
-       * new jobs while allowing the currently active processor to finish.
-       */
       const drainPromise = this.incomingWorker.close();
 
       this.logger.info(
@@ -163,14 +155,30 @@ export class WorkerRuntime {
       );
     } catch (error) {
       shutdownErrors.push(error);
+    }
 
-      this.logger.error(
-        {
-          err: error,
-          reason,
-        },
-        "Failed to drain incoming worker",
-      );
+    try {
+      if (this.routingWorker) {
+        const routingDrainPromise = this.routingWorker.close();
+
+        this.logger.info(
+          {
+            reason,
+          },
+          "Routing worker stopped; draining active jobs",
+        );
+
+        await routingDrainPromise;
+
+        this.logger.info(
+          {
+            reason,
+          },
+          "Routing worker active jobs drained",
+        );
+      }
+    } catch (error) {
+      shutdownErrors.push(error);
     }
 
     try {
@@ -184,14 +192,6 @@ export class WorkerRuntime {
       );
     } catch (error) {
       shutdownErrors.push(error);
-
-      this.logger.error(
-        {
-          err: error,
-          reason,
-        },
-        "Failed to close worker queues",
-      );
     }
 
     try {
@@ -205,17 +205,7 @@ export class WorkerRuntime {
       );
     } catch (error) {
       shutdownErrors.push(error);
-
-      this.logger.error(
-        {
-          err: error,
-          reason,
-        },
-        "Failed to disconnect worker database",
-      );
     }
-
-    this.started = false;
 
     if (shutdownErrors.length > 0) {
       throw new AggregateError(
@@ -240,8 +230,8 @@ export async function createWorkerRuntime(
   const database = createDatabaseClient(config.databaseUrl);
 
   let queues: PulseRouteQueues | undefined;
-
   let incomingWorker: ReturnType<typeof createIncomingWorker> | undefined;
+  let routingWorker: ReturnType<typeof createRoutingWorker> | undefined;
 
   try {
     queues = createPulseRouteQueues(config.redisUrl);
@@ -260,13 +250,31 @@ export async function createWorkerRuntime(
       logger.error(
         {
           err: error,
-          component: "incoming-worker",
         },
-        "Incoming worker infrastructure error",
+        "Incoming worker error",
       );
     });
 
-    await incomingWorker.waitUntilReady();
+    routingWorker = createRoutingWorker({
+      database,
+      deadLetterQueue: queues.deadLetter,
+      logger,
+      redisUrl: config.redisUrl,
+    });
+
+    routingWorker.on("error", (error) => {
+      logger.error(
+        {
+          err: error,
+        },
+        "Routing worker error",
+      );
+    });
+
+    await Promise.all([
+      incomingWorker.waitUntilReady(),
+      routingWorker.waitUntilReady(),
+    ]);
 
     const publisher = new InternalOutboxPublisher({
       database,
@@ -274,18 +282,30 @@ export async function createWorkerRuntime(
       logger,
     });
 
-    return new WorkerRuntime({
+    const runtime = new WorkerRuntime({
       database,
       queues,
       incomingWorker,
       publisher,
       logger,
     });
+
+    runtime.registerRoutingWorker(routingWorker);
+
+    return runtime;
   } catch (error) {
     if (incomingWorker) {
       const workerToClose = incomingWorker;
 
       await attemptStartupCleanup(logger, "incoming-worker", () =>
+        workerToClose.close(true),
+      );
+    }
+
+    if (routingWorker) {
+      const workerToClose = routingWorker;
+
+      await attemptStartupCleanup(logger, "routing-worker", () =>
         workerToClose.close(true),
       );
     }
@@ -298,9 +318,7 @@ export async function createWorkerRuntime(
       );
     }
 
-    await attemptStartupCleanup(logger, "database", () =>
-      database.$disconnect(),
-    );
+    await database.$disconnect().catch(() => undefined);
 
     throw error;
   }
@@ -308,43 +326,28 @@ export async function createWorkerRuntime(
 
 export async function runWorkerProcess(
   runtime: WorkerRuntime,
-  signalSource: SignalSource = process,
+  signalSource: NodeJS.Process = process,
 ): Promise<void> {
   try {
-    runtime.start();
+    await runtime.start();
   } catch (error) {
-    await runtime.shutdown("startup_failure").catch(() => undefined);
-
+    signalSource.exitCode = 1;
     throw error;
   }
 
-  await new Promise<void>((resolve, reject) => {
-    let shutdownStarted = false;
+  const handleSignal = (signal: NodeJS.Signals) => {
+    void runtime.shutdown(signal).catch((error) => {
+      signalSource.exitCode = 1;
+      runtime["logger"].error(
+        {
+          err: error,
+          signal,
+        },
+        "Worker shutdown failed",
+      );
+    });
+  };
 
-    const handleSignal = (signal: NodeJS.Signals) => {
-      if (shutdownStarted) {
-        return;
-      }
-
-      shutdownStarted = true;
-
-      signalSource.removeListener("SIGTERM", onSigterm);
-
-      signalSource.removeListener("SIGINT", onSigint);
-
-      void runtime.shutdown(signal).then(resolve, reject);
-    };
-
-    const onSigterm = () => {
-      handleSignal("SIGTERM");
-    };
-
-    const onSigint = () => {
-      handleSignal("SIGINT");
-    };
-
-    signalSource.once("SIGTERM", onSigterm);
-
-    signalSource.once("SIGINT", onSigint);
-  });
+  signalSource.once("SIGTERM", handleSignal);
+  signalSource.once("SIGINT", handleSignal);
 }
