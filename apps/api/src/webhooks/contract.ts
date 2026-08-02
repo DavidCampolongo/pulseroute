@@ -1,11 +1,13 @@
+import { EVENT_TYPES } from "@pulseroute/shared";
 import { z } from "zod";
 
 export const WEBHOOK_TIMESTAMP_HEADER = "x-pulseroute-timestamp";
+
 export const WEBHOOK_SIGNATURE_HEADER = "x-pulseroute-signature";
 
 export const WEBHOOK_PROVIDER = "pulseroute";
 
-export const SERVICE_REQUEST_EVENT_TYPE = "service_request.created";
+export const SERVICE_REQUEST_EVENT_TYPE = EVENT_TYPES.serviceRequestCreated;
 
 const identifierSchema = z.string().trim().min(1).max(200);
 

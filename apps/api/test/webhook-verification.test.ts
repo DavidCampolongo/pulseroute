@@ -278,6 +278,7 @@ describe("POST /webhooks/service-requests verification", () => {
 
     expect(outboxEvent.payload).toEqual({
       serviceRequestId,
+      correlationId: responseBody.requestId,
       externalId: "request-verification-001",
       requiredSkillId,
       priority: "HIGH",
