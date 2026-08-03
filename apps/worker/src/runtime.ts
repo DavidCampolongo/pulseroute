@@ -12,6 +12,7 @@ import {
   type IncomingProcessorResult,
 } from "./incoming-worker.js";
 import { createRoutingWorker } from "./routing-worker.js";
+import type { RoutingAssignmentResult } from "./routing-workflow.js";
 import { InternalOutboxPublisher } from "./outbox-publisher.js";
 import {
   closePulseRouteQueues,
@@ -30,7 +31,7 @@ export type RuntimeIncomingWorker = Pick<
 >;
 
 export type RuntimeRoutingWorker = Pick<
-  Worker<RouteServiceRequestJobData, unknown, string>,
+  Worker<RouteServiceRequestJobData, RoutingAssignmentResult, string>,
   "close"
 >;
 
