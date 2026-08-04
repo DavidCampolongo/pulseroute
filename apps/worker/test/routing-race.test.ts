@@ -36,6 +36,7 @@ const workerDatabase = createDatabaseClient(databaseUrl);
 const blockerDatabase = createDatabaseClient(databaseUrl);
 
 const queueName = `phase7-routing-race-${randomUUID()}`;
+
 const routingQueue = new Queue<RouteServiceRequestJobData>(queueName, {
   connection: createProducerRedisOptions(redisUrl),
   skipWaitingForReady: true,
@@ -57,16 +58,19 @@ const logger = createWorkerLogger({
 let workerA:
   | Worker<RouteServiceRequestJobData, RoutingAssignmentResult, string>
   | undefined;
+
 let workerB:
   | Worker<RouteServiceRequestJobData, RoutingAssignmentResult, string>
   | undefined;
 
-async function createRoutingFixture(): Promise<{
+type RoutingFixture = {
   organizationId: string;
   skillId: string;
   operatorId: string;
   serviceRequestId: string;
-}> {
+};
+
+async function createRoutingFixture(): Promise<RoutingFixture> {
   const organizationId = randomUUID();
   const skillId = randomUUID();
   const operatorId = randomUUID();
@@ -127,19 +131,20 @@ async function createRoutingFixture(): Promise<{
   };
 }
 
-async function clearRoutingFixture(fixture: {
-  organizationId: string;
-  skillId: string;
-  operatorId: string;
-  serviceRequestId: string;
-}): Promise<void> {
-  await fixtureDatabase.routingDecision.deleteMany({
+async function clearRoutingFixture(fixture: RoutingFixture): Promise<void> {
+  await fixtureDatabase.webhookDelivery.deleteMany({
     where: {
       organizationId: fixture.organizationId,
     },
   });
 
   await fixtureDatabase.outboxEvent.deleteMany({
+    where: {
+      organizationId: fixture.organizationId,
+    },
+  });
+
+  await fixtureDatabase.routingDecision.deleteMany({
     where: {
       organizationId: fixture.organizationId,
     },
@@ -183,47 +188,6 @@ async function clearRoutingFixture(fixture: {
   await fixtureDatabase.organization.deleteMany({
     where: {
       id: fixture.organizationId,
-    },
-  });
-}
-
-async function resetSeedOutcome(): Promise<void> {
-  const organizationId = "00000001-0000-4000-8000-000000000001";
-  const serviceRequestId = "00000005-0000-4000-8000-000000000012";
-
-  await fixtureDatabase.webhookDelivery.deleteMany({
-    where: {
-      organizationId,
-    },
-  });
-
-  await fixtureDatabase.outboxEvent.deleteMany({
-    where: {
-      organizationId,
-      aggregateId: serviceRequestId,
-    },
-  });
-
-  await fixtureDatabase.routingDecision.deleteMany({
-    where: {
-      organizationId,
-      serviceRequestId,
-    },
-  });
-
-  await fixtureDatabase.assignment.deleteMany({
-    where: {
-      organizationId,
-      serviceRequestId,
-    },
-  });
-
-  await fixtureDatabase.serviceRequest.update({
-    where: {
-      id: serviceRequestId,
-    },
-    data: {
-      status: "PENDING",
     },
   });
 }
@@ -420,7 +384,6 @@ describe("routing race", () => {
       expect(assignment.operatorId).toBe(fixture.operatorId);
     } finally {
       await clearRoutingFixture(fixture);
-      await resetSeedOutcome();
     }
   });
 });

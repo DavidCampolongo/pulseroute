@@ -24,10 +24,21 @@ if (!databaseUrl) {
 
 const database = createDatabaseClient(databaseUrl);
 
-async function createTenantMismatchFixture(): Promise<{
+type RequestFixture = {
   organizationId: string;
+  skillId: string;
   serviceRequestId: string;
-}> {
+};
+
+type RequestFixtureOptions = {
+  status: "PENDING" | "ASSIGNED" | "CANCELLED";
+  priority: "LOW" | "NORMAL" | "HIGH";
+  region: "NORTH" | "SOUTH" | "EAST" | "WEST";
+};
+
+async function createRequestFixture(
+  options: RequestFixtureOptions,
+): Promise<RequestFixture> {
   const organizationId = randomUUID();
   const skillId = randomUUID();
   const serviceRequestId = randomUUID();
@@ -53,38 +64,53 @@ async function createTenantMismatchFixture(): Promise<{
       organizationId,
       externalId: `routing-transaction-${serviceRequestId}`,
       requiredSkillId: skillId,
-      status: "PENDING",
-      priority: "NORMAL",
-      region: "WEST",
+      status: options.status,
+      priority: options.priority,
+      region: options.region,
     },
   });
 
   return {
     organizationId,
+    skillId,
     serviceRequestId,
   };
 }
 
-async function clearTenantMismatchFixture(
-  organizationId: string,
-  serviceRequestId: string,
-): Promise<void> {
+async function clearRequestFixture(fixture: RequestFixture): Promise<void> {
+  await database.assignment.deleteMany({
+    where: {
+      organizationId: fixture.organizationId,
+    },
+  });
+
+  await database.routingDecision.deleteMany({
+    where: {
+      organizationId: fixture.organizationId,
+    },
+  });
+
+  await database.outboxEvent.deleteMany({
+    where: {
+      organizationId: fixture.organizationId,
+    },
+  });
+
   await database.serviceRequest.deleteMany({
     where: {
-      id: serviceRequestId,
-      organizationId,
+      organizationId: fixture.organizationId,
     },
   });
 
   await database.skill.deleteMany({
     where: {
-      organizationId,
+      organizationId: fixture.organizationId,
     },
   });
 
   await database.organization.deleteMany({
     where: {
-      id: organizationId,
+      id: fixture.organizationId,
     },
   });
 }
@@ -95,92 +121,123 @@ afterAll(async () => {
 
 describe("prepareRouteServiceRequest", () => {
   it("locks a pending request and returns the pending outcome", async () => {
-    const result = await prepareRouteServiceRequest(database, {
-      organizationId: "00000001-0000-4000-8000-000000000001",
-      serviceRequestId: "00000005-0000-4000-8000-000000000012",
-      correlationId: `req-${randomUUID()}`,
+    const fixture = await createRequestFixture({
+      status: "PENDING",
+      priority: "NORMAL",
+      region: "WEST",
     });
 
-    expect(result).toEqual({
-      kind: "pending_locked",
-      request: {
-        id: "00000005-0000-4000-8000-000000000012",
-        organizationId: "00000001-0000-4000-8000-000000000001",
-        status: "PENDING",
-        requiredSkillId: "00000003-0000-4000-8000-000000000004",
-        priority: "NORMAL",
-        region: "WEST",
-      },
-    });
+    try {
+      const result = await prepareRouteServiceRequest(database, {
+        organizationId: fixture.organizationId,
+        serviceRequestId: fixture.serviceRequestId,
+        correlationId: `request-${randomUUID()}`,
+      });
+
+      expect(result).toEqual({
+        kind: "pending_locked",
+        request: {
+          id: fixture.serviceRequestId,
+          organizationId: fixture.organizationId,
+          status: "PENDING",
+          requiredSkillId: fixture.skillId,
+          priority: "NORMAL",
+          region: "WEST",
+        },
+      });
+    } finally {
+      await clearRequestFixture(fixture);
+    }
   });
 
   it("returns a clean no-op for an already assigned request", async () => {
-    const result = await prepareRouteServiceRequest(database, {
-      organizationId: "00000001-0000-4000-8000-000000000001",
-      serviceRequestId: "00000005-0000-4000-8000-000000000001",
-      correlationId: `req-${randomUUID()}`,
+    const fixture = await createRequestFixture({
+      status: "ASSIGNED",
+      priority: "HIGH",
+      region: "WEST",
     });
 
-    expect(result).toEqual({
-      kind: "terminal_no_op",
-      terminalStatus: "ASSIGNED",
-      request: {
-        id: "00000005-0000-4000-8000-000000000001",
-        organizationId: "00000001-0000-4000-8000-000000000001",
-        status: "ASSIGNED",
-        requiredSkillId: "00000003-0000-4000-8000-000000000008",
-        priority: "HIGH",
-        region: "WEST",
-      },
-    });
+    try {
+      const result = await prepareRouteServiceRequest(database, {
+        organizationId: fixture.organizationId,
+        serviceRequestId: fixture.serviceRequestId,
+        correlationId: `request-${randomUUID()}`,
+      });
+
+      expect(result).toEqual({
+        kind: "terminal_no_op",
+        terminalStatus: "ASSIGNED",
+        request: {
+          id: fixture.serviceRequestId,
+          organizationId: fixture.organizationId,
+          status: "ASSIGNED",
+          requiredSkillId: fixture.skillId,
+          priority: "HIGH",
+          region: "WEST",
+        },
+      });
+    } finally {
+      await clearRequestFixture(fixture);
+    }
   });
 
   it("returns a clean no-op for a cancelled request", async () => {
-    const result = await prepareRouteServiceRequest(database, {
-      organizationId: "00000001-0000-4000-8000-000000000001",
-      serviceRequestId: "00000005-0000-4000-8000-000000000008",
-      correlationId: `req-${randomUUID()}`,
+    const fixture = await createRequestFixture({
+      status: "CANCELLED",
+      priority: "NORMAL",
+      region: "SOUTH",
     });
 
-    expect(result).toEqual({
-      kind: "terminal_no_op",
-      terminalStatus: "CANCELLED",
-      request: {
-        id: "00000005-0000-4000-8000-000000000008",
-        organizationId: "00000001-0000-4000-8000-000000000001",
-        status: "CANCELLED",
-        requiredSkillId: "00000003-0000-4000-8000-000000000003",
-        priority: "NORMAL",
-        region: "SOUTH",
-      },
-    });
+    try {
+      const result = await prepareRouteServiceRequest(database, {
+        organizationId: fixture.organizationId,
+        serviceRequestId: fixture.serviceRequestId,
+        correlationId: `request-${randomUUID()}`,
+      });
+
+      expect(result).toEqual({
+        kind: "terminal_no_op",
+        terminalStatus: "CANCELLED",
+        request: {
+          id: fixture.serviceRequestId,
+          organizationId: fixture.organizationId,
+          status: "CANCELLED",
+          requiredSkillId: fixture.skillId,
+          priority: "NORMAL",
+          region: "SOUTH",
+        },
+      });
+    } finally {
+      await clearRequestFixture(fixture);
+    }
   });
 
   it("rejects a tenant mismatch", async () => {
-    const fixture = await createTenantMismatchFixture();
+    const fixture = await createRequestFixture({
+      status: "PENDING",
+      priority: "NORMAL",
+      region: "WEST",
+    });
 
     try {
       await expect(
         prepareRouteServiceRequest(database, {
-          organizationId: "00000001-0000-4000-8000-000000000001",
+          organizationId: randomUUID(),
           serviceRequestId: fixture.serviceRequestId,
-          correlationId: `req-${randomUUID()}`,
+          correlationId: `request-${randomUUID()}`,
         }),
       ).rejects.toBeInstanceOf(RouteServiceRequestTenantMismatchError);
     } finally {
-      await clearTenantMismatchFixture(
-        fixture.organizationId,
-        fixture.serviceRequestId,
-      );
+      await clearRequestFixture(fixture);
     }
   });
 
   it("rejects a missing request", async () => {
     await expect(
       prepareRouteServiceRequest(database, {
-        organizationId: "00000001-0000-4000-8000-000000000001",
+        organizationId: randomUUID(),
         serviceRequestId: randomUUID(),
-        correlationId: `req-${randomUUID()}`,
+        correlationId: `request-${randomUUID()}`,
       }),
     ).rejects.toBeInstanceOf(RouteServiceRequestMissingError);
   });

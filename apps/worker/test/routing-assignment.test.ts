@@ -20,12 +20,22 @@ if (!databaseUrl) {
 
 const database = createDatabaseClient(databaseUrl);
 
-async function createRoutingFixture(): Promise<{
+type RoutingFixture = {
   organizationId: string;
   skillId: string;
   operatorId: string;
   serviceRequestId: string;
-}> {
+};
+
+type RoutingFixtureOptions = {
+  maxConcurrentAssignments: number;
+  requiredSkillLevel: number;
+  activeAssignmentCount: number;
+};
+
+async function createRoutingFixture(
+  options: RoutingFixtureOptions,
+): Promise<RoutingFixture> {
   const organizationId = randomUUID();
   const skillId = randomUUID();
   const operatorId = randomUUID();
@@ -53,7 +63,7 @@ async function createRoutingFixture(): Promise<{
       name: `Routing Assignment Test Operator ${operatorId}`,
       status: "AVAILABLE",
       region: "WEST",
-      maxConcurrentAssignments: 2,
+      maxConcurrentAssignments: options.maxConcurrentAssignments,
     },
   });
 
@@ -62,7 +72,7 @@ async function createRoutingFixture(): Promise<{
       organizationId,
       operatorId,
       skillId,
-      level: 4,
+      level: options.requiredSkillLevel,
     },
   });
 
@@ -70,13 +80,39 @@ async function createRoutingFixture(): Promise<{
     data: {
       id: serviceRequestId,
       organizationId,
-      externalId: `routing-assignment-${serviceRequestId}`,
+      externalId: `routing-assignment-target-${serviceRequestId}`,
       requiredSkillId: skillId,
       status: "PENDING",
       priority: "NORMAL",
       region: "WEST",
     },
   });
+
+  for (let index = 0; index < options.activeAssignmentCount; index += 1) {
+    const activeRequestId = randomUUID();
+
+    await database.serviceRequest.create({
+      data: {
+        id: activeRequestId,
+        organizationId,
+        externalId: `routing-assignment-active-${activeRequestId}`,
+        requiredSkillId: skillId,
+        status: "ASSIGNED",
+        priority: "NORMAL",
+        region: "WEST",
+      },
+    });
+
+    await database.assignment.create({
+      data: {
+        id: randomUUID(),
+        organizationId,
+        serviceRequestId: activeRequestId,
+        operatorId,
+        status: "ACTIVE",
+      },
+    });
+  }
 
   return {
     organizationId,
@@ -86,12 +122,7 @@ async function createRoutingFixture(): Promise<{
   };
 }
 
-async function clearRoutingFixture(fixture: {
-  organizationId: string;
-  skillId: string;
-  operatorId: string;
-  serviceRequestId: string;
-}): Promise<void> {
+async function clearRoutingFixture(fixture: RoutingFixture): Promise<void> {
   await database.webhookDelivery.deleteMany({
     where: {
       organizationId: fixture.organizationId,
@@ -118,7 +149,6 @@ async function clearRoutingFixture(fixture: {
 
   await database.serviceRequest.deleteMany({
     where: {
-      id: fixture.serviceRequestId,
       organizationId: fixture.organizationId,
     },
   });
@@ -126,21 +156,17 @@ async function clearRoutingFixture(fixture: {
   await database.operatorSkill.deleteMany({
     where: {
       organizationId: fixture.organizationId,
-      operatorId: fixture.operatorId,
-      skillId: fixture.skillId,
     },
   });
 
   await database.operator.deleteMany({
     where: {
-      id: fixture.operatorId,
       organizationId: fixture.organizationId,
     },
   });
 
   await database.skill.deleteMany({
     where: {
-      id: fixture.skillId,
       organizationId: fixture.organizationId,
     },
   });
@@ -152,47 +178,17 @@ async function clearRoutingFixture(fixture: {
   });
 }
 
-async function clearSeedRoutingOutcome(
-  serviceRequestId: string,
-): Promise<void> {
-  const organizationId = "00000001-0000-4000-8000-000000000001";
-
-  await database.webhookDelivery.deleteMany({
-    where: {
-      organizationId,
-    },
-  });
-
-  await database.outboxEvent.deleteMany({
-    where: {
-      organizationId,
-    },
-  });
-
-  await database.routingDecision.deleteMany({
-    where: {
-      organizationId,
-      serviceRequestId,
-    },
-  });
-
-  await database.serviceRequest.update({
-    where: {
-      id: serviceRequestId,
-    },
-    data: {
-      status: "PENDING",
-    },
-  });
-}
-
 afterAll(async () => {
   await database.$disconnect();
 });
 
 describe("executeRouteServiceRequest", () => {
   it("creates the assignment, routing decision, request transition, and outbox intent in one transaction", async () => {
-    const fixture = await createRoutingFixture();
+    const fixture = await createRoutingFixture({
+      maxConcurrentAssignments: 2,
+      requiredSkillLevel: 4,
+      activeAssignmentCount: 0,
+    });
 
     try {
       const result = await executeRouteServiceRequest(database, {
@@ -286,68 +282,91 @@ describe("executeRouteServiceRequest", () => {
   });
 
   it("creates an unroutable routing decision with no assignment and no notification outbox event", async () => {
-    const serviceRequestId = "00000005-0000-4000-8000-000000000010";
-    const organizationId = "00000001-0000-4000-8000-000000000001";
-
-    const result = await executeRouteServiceRequest(database, {
-      organizationId,
-      serviceRequestId,
-      correlationId: `request-${randomUUID()}`,
+    const fixture = await createRoutingFixture({
+      maxConcurrentAssignments: 1,
+      requiredSkillLevel: 5,
+      activeAssignmentCount: 1,
     });
 
-    expect(result.kind).toBe("unroutable");
+    try {
+      const result = await executeRouteServiceRequest(database, {
+        organizationId: fixture.organizationId,
+        serviceRequestId: fixture.serviceRequestId,
+        correlationId: `request-${randomUUID()}`,
+      });
 
-    if (result.kind !== "unroutable") {
-      throw new Error("Expected an unroutable routing result");
-    }
+      expect(result.kind).toBe("unroutable");
 
-    const routingDecision = await database.routingDecision.findUniqueOrThrow({
-      where: {
-        id: result.routingDecisionId,
-      },
-    });
+      if (result.kind !== "unroutable") {
+        throw new Error("Expected an unroutable routing result");
+      }
 
-    const serviceRequest = await database.serviceRequest.findUniqueOrThrow({
-      where: {
-        id: serviceRequestId,
-      },
-    });
+      const routingDecision = await database.routingDecision.findUniqueOrThrow({
+        where: {
+          id: result.routingDecisionId,
+        },
+      });
 
-    const assignments = await database.assignment.findMany({
-      where: {
-        organizationId,
-        serviceRequestId,
-      },
-    });
+      const serviceRequest = await database.serviceRequest.findUniqueOrThrow({
+        where: {
+          id: fixture.serviceRequestId,
+        },
+      });
 
-    const outboxEvents = await database.outboxEvent.findMany({
-      where: {
-        organizationId,
-        aggregateId: serviceRequestId,
-      },
-    });
+      const targetAssignments = await database.assignment.findMany({
+        where: {
+          organizationId: fixture.organizationId,
+          serviceRequestId: fixture.serviceRequestId,
+        },
+      });
 
-    expect(result.rejectionReasons).toContain("AT_CAPACITY");
-    expect(routingDecision.outcome).toBe("UNROUTABLE");
-    expect(routingDecision.assignmentId).toBeNull();
-    expect(serviceRequest.status).toBe("UNROUTABLE");
-    expect(assignments).toHaveLength(0);
-    expect(outboxEvents).toHaveLength(0);
+      const targetOutboxEvents = await database.outboxEvent.findMany({
+        where: {
+          organizationId: fixture.organizationId,
+          aggregateId: fixture.serviceRequestId,
+        },
+      });
 
-    expect(routingDecision.decisionSnapshot).toMatchObject({
-      scoringVersion: "phase-7-stub-v1",
-      request: {
-        id: serviceRequestId,
-        organizationId,
-        status: "PENDING",
-        region: "WEST",
-      },
-      result: {
+      const activeOperatorAssignments = await database.assignment.count({
+        where: {
+          organizationId: fixture.organizationId,
+          operatorId: fixture.operatorId,
+          status: "ACTIVE",
+        },
+      });
+
+      expect(result.rejectionReasons).toContain("AT_CAPACITY");
+
+      expect(routingDecision).toMatchObject({
+        organizationId: fixture.organizationId,
+        serviceRequestId: fixture.serviceRequestId,
+        assignmentId: null,
+        scoringVersion: "phase-7-stub-v1",
         outcome: "UNROUTABLE",
-        selectedOperatorId: null,
-      },
-    });
+      });
 
-    await clearSeedRoutingOutcome(serviceRequestId);
+      expect(serviceRequest.status).toBe("UNROUTABLE");
+      expect(targetAssignments).toHaveLength(0);
+      expect(targetOutboxEvents).toHaveLength(0);
+      expect(activeOperatorAssignments).toBe(1);
+
+      expect(routingDecision.decisionSnapshot).toMatchObject({
+        scoringVersion: "phase-7-stub-v1",
+        request: {
+          id: fixture.serviceRequestId,
+          organizationId: fixture.organizationId,
+          requiredSkillId: fixture.skillId,
+          status: "PENDING",
+          priority: "NORMAL",
+          region: "WEST",
+        },
+        result: {
+          outcome: "UNROUTABLE",
+          selectedOperatorId: null,
+        },
+      });
+    } finally {
+      await clearRoutingFixture(fixture);
+    }
   });
 });
