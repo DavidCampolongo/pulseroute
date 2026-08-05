@@ -540,7 +540,7 @@ describe("routing retry and dead-letter behavior", () => {
       expect(savedSourceJob.attemptsMade).toBe(3);
       expect(savedSourceJob.attemptsStarted).toBe(3);
 
-      expect(await deadLetterQueue.getJob(deadLetterJobId)).toBeNull();
+      expect(await deadLetterQueue.getJob(deadLetterJobId)).toBeUndefined();
 
       expect(await readDurableRoutingState(fixture)).toEqual({
         serviceRequestStatus: "ASSIGNED",
@@ -687,7 +687,7 @@ describe("routing retry and dead-letter behavior", () => {
       expect(savedSourceJob.attemptsMade).toBe(1);
       expect(savedSourceJob.attemptsStarted).toBe(1);
 
-      expect(await deadLetterQueue.getJob(deadLetterJobId)).toBeNull();
+      expect(await deadLetterQueue.getJob(deadLetterJobId)).toBeUndefined();
 
       expect(await readDurableRoutingState(fixture)).toEqual({
         serviceRequestStatus: "UNROUTABLE",
@@ -772,9 +772,13 @@ describe("routing retry and dead-letter behavior", () => {
       expect(savedReplayJob.attemptsMade).toBe(1);
       expect(savedReplayJob.attemptsStarted).toBe(1);
 
-      expect(await deadLetterQueue.getJob(initialDeadLetterJobId)).toBeNull();
+      expect(
+        await deadLetterQueue.getJob(initialDeadLetterJobId),
+      ).toBeUndefined();
 
-      expect(await deadLetterQueue.getJob(replayDeadLetterJobId)).toBeNull();
+      expect(
+        await deadLetterQueue.getJob(replayDeadLetterJobId),
+      ).toBeUndefined();
 
       expect(await readDurableRoutingState(fixture)).toEqual({
         serviceRequestStatus: "ASSIGNED",
