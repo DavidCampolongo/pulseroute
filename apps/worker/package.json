@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@pulseroute/db": "workspace:*",
+    "@pulseroute/scoring": "workspace:*",
     "@pulseroute/shared": "workspace:*",
     "bullmq": "5.81.2",
     "dotenv": "17.4.2",

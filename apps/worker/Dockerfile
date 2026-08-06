@@ -30,6 +30,7 @@ RUN DATABASE_URL=postgresql://pulseroute:build-only@127.0.0.1:5432/pulseroute \
 
 RUN pnpm --filter @pulseroute/db run build \
     && pnpm --filter @pulseroute/shared run build \
+    && pnpm --filter @pulseroute/scoring run build \
     && pnpm --filter @pulseroute/worker run build
 
 RUN pnpm \
