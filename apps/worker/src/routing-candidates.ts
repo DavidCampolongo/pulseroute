@@ -25,6 +25,8 @@ export type RoutingCandidateRow = {
   requiredSkillId: string;
   requiredSkillLevel: number | null;
   hasRequiredSkill: boolean;
+  lastAssignedAt: Date | null;
+  totalAssignmentCount: number;
 };
 
 type QueryableDatabase = Pick<DatabaseClient, "$queryRaw">;
@@ -42,29 +44,36 @@ export async function loadRoutingCandidates(
       o.max_concurrent_assignments AS "maxConcurrentAssignments",
       (
         SELECT COUNT(*)::int
-        FROM assignments a
-        WHERE a.organization_id = o.organization_id
-          AND a.operator_id = o.id
-          AND a.status = 'ACTIVE'::"AssignmentStatus"
+        FROM assignments active_assignment
+        WHERE active_assignment.organization_id = o.organization_id
+          AND active_assignment.operator_id = o.id
+          AND active_assignment.status = 'ACTIVE'::"AssignmentStatus"
       ) AS "activeAssignmentCount",
       sr.required_skill_id AS "requiredSkillId",
       os.level AS "requiredSkillLevel",
-      TRUE AS "hasRequiredSkill"
+      (os.id IS NOT NULL) AS "hasRequiredSkill",
+      (
+        SELECT MAX(historical_assignment.created_at)
+        FROM assignments historical_assignment
+        WHERE historical_assignment.organization_id = o.organization_id
+          AND historical_assignment.operator_id = o.id
+      ) AS "lastAssignedAt",
+      (
+        SELECT COUNT(*)::int
+        FROM assignments historical_assignment
+        WHERE historical_assignment.organization_id = o.organization_id
+          AND historical_assignment.operator_id = o.id
+      ) AS "totalAssignmentCount"
     FROM service_requests sr
     JOIN operators o
       ON o.organization_id = sr.organization_id
-    JOIN operator_skills os
+    LEFT JOIN operator_skills os
       ON os.organization_id = o.organization_id
      AND os.operator_id = o.id
      AND os.skill_id = sr.required_skill_id
     WHERE sr.id = ${input.serviceRequestId}::uuid
       AND sr.organization_id = ${input.organizationId}::uuid
-      AND o.status = 'AVAILABLE'::"OperatorStatus"
-      AND o.region = sr.region
-    ORDER BY
-      "activeAssignmentCount" ASC,
-      "requiredSkillLevel" DESC,
-      o.id ASC
+    ORDER BY o.id ASC
   `);
 
   return rows;

@@ -20,60 +20,66 @@ if (!databaseUrl) {
 
 const database = createDatabaseClient(databaseUrl);
 
-type CandidateFixture = {
+const HISTORICAL_ASSIGNMENT_AT = new Date("2026-07-20T12:00:00.000Z");
+const ACTIVE_ASSIGNMENT_AT = new Date("2026-08-01T12:00:00.000Z");
+
+type CandidateAuditFixture = {
   organizationId: string;
+  otherOrganizationId: string;
   skillId: string;
-  operatorId: string;
   serviceRequestId: string;
+  operatorIds: {
+    eligible: string;
+    unavailable: string;
+    wrongRegion: string;
+    missingSkill: string;
+    atCapacity: string;
+    otherOrganization: string;
+  };
 };
 
-type CandidateFixtureOptions = {
-  maxConcurrentAssignments: number;
-  requiredSkillLevel: number;
-  activeAssignmentCount: number;
-};
-
-async function createCandidateFixture(
-  options: CandidateFixtureOptions,
-): Promise<CandidateFixture> {
+async function createCandidateAuditFixture(): Promise<CandidateAuditFixture> {
   const organizationId = randomUUID();
+  const otherOrganizationId = randomUUID();
   const skillId = randomUUID();
-  const operatorId = randomUUID();
+  const otherSkillId = randomUUID();
   const serviceRequestId = randomUUID();
 
-  await database.organization.create({
-    data: {
-      id: organizationId,
-      name: `Routing Candidate Test Org ${organizationId}`,
-    },
+  const operatorIds = {
+    eligible: randomUUID(),
+    unavailable: randomUUID(),
+    wrongRegion: randomUUID(),
+    missingSkill: randomUUID(),
+    atCapacity: randomUUID(),
+    otherOrganization: randomUUID(),
+  };
+
+  await database.organization.createMany({
+    data: [
+      {
+        id: organizationId,
+        name: `Routing Candidate Audit Org ${organizationId}`,
+      },
+      {
+        id: otherOrganizationId,
+        name: `Routing Candidate Other Org ${otherOrganizationId}`,
+      },
+    ],
   });
 
-  await database.skill.create({
-    data: {
-      id: skillId,
-      organizationId,
-      name: `Routing Candidate Test Skill ${skillId}`,
-    },
-  });
-
-  await database.operator.create({
-    data: {
-      id: operatorId,
-      organizationId,
-      name: `Routing Candidate Test Operator ${operatorId}`,
-      status: "AVAILABLE",
-      region: "WEST",
-      maxConcurrentAssignments: options.maxConcurrentAssignments,
-    },
-  });
-
-  await database.operatorSkill.create({
-    data: {
-      organizationId,
-      operatorId,
-      skillId,
-      level: options.requiredSkillLevel,
-    },
+  await database.skill.createMany({
+    data: [
+      {
+        id: skillId,
+        organizationId,
+        name: `Routing Candidate Audit Skill ${skillId}`,
+      },
+      {
+        id: otherSkillId,
+        organizationId: otherOrganizationId,
+        name: `Routing Candidate Other Skill ${otherSkillId}`,
+      },
+    ],
   });
 
   await database.serviceRequest.create({
@@ -88,74 +94,227 @@ async function createCandidateFixture(
     },
   });
 
-  for (let index = 0; index < options.activeAssignmentCount; index += 1) {
-    const activeRequestId = randomUUID();
-
-    await database.serviceRequest.create({
-      data: {
-        id: activeRequestId,
+  await database.operator.createMany({
+    data: [
+      {
+        id: operatorIds.eligible,
         organizationId,
-        externalId: `routing-candidate-active-${activeRequestId}`,
-        requiredSkillId: skillId,
-        status: "ASSIGNED",
-        priority: "NORMAL",
+        name: "Eligible Operator",
+        status: "AVAILABLE",
         region: "WEST",
+        maxConcurrentAssignments: 4,
       },
-    });
-
-    await database.assignment.create({
-      data: {
-        id: randomUUID(),
+      {
+        id: operatorIds.unavailable,
         organizationId,
-        serviceRequestId: activeRequestId,
-        operatorId,
-        status: "ACTIVE",
+        name: "Unavailable Operator",
+        status: "UNAVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 4,
       },
-    });
-  }
+      {
+        id: operatorIds.wrongRegion,
+        organizationId,
+        name: "Wrong Region Operator",
+        status: "AVAILABLE",
+        region: "EAST",
+        maxConcurrentAssignments: 4,
+      },
+      {
+        id: operatorIds.missingSkill,
+        organizationId,
+        name: "Missing Skill Operator",
+        status: "AVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 4,
+      },
+      {
+        id: operatorIds.atCapacity,
+        organizationId,
+        name: "At Capacity Operator",
+        status: "AVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 1,
+      },
+      {
+        id: operatorIds.otherOrganization,
+        organizationId: otherOrganizationId,
+        name: "Other Organization Operator",
+        status: "AVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 4,
+      },
+    ],
+  });
+
+  await database.operatorSkill.createMany({
+    data: [
+      {
+        organizationId,
+        operatorId: operatorIds.eligible,
+        skillId,
+        level: 4,
+      },
+      {
+        organizationId,
+        operatorId: operatorIds.unavailable,
+        skillId,
+        level: 3,
+      },
+      {
+        organizationId,
+        operatorId: operatorIds.wrongRegion,
+        skillId,
+        level: 5,
+      },
+      {
+        organizationId,
+        operatorId: operatorIds.atCapacity,
+        skillId,
+        level: 5,
+      },
+      {
+        organizationId: otherOrganizationId,
+        operatorId: operatorIds.otherOrganization,
+        skillId: otherSkillId,
+        level: 5,
+      },
+    ],
+  });
+
+  const historicalRequestId = randomUUID();
+
+  await database.serviceRequest.create({
+    data: {
+      id: historicalRequestId,
+      organizationId,
+      externalId: `routing-candidate-history-${historicalRequestId}`,
+      requiredSkillId: skillId,
+      status: "ASSIGNED",
+      priority: "NORMAL",
+      region: "WEST",
+    },
+  });
+
+  await database.assignment.create({
+    data: {
+      id: randomUUID(),
+      organizationId,
+      serviceRequestId: historicalRequestId,
+      operatorId: operatorIds.eligible,
+      status: "CANCELLED",
+      createdAt: HISTORICAL_ASSIGNMENT_AT,
+    },
+  });
+
+  const activeRequestId = randomUUID();
+
+  await database.serviceRequest.create({
+    data: {
+      id: activeRequestId,
+      organizationId,
+      externalId: `routing-candidate-active-${activeRequestId}`,
+      requiredSkillId: skillId,
+      status: "ASSIGNED",
+      priority: "NORMAL",
+      region: "WEST",
+    },
+  });
+
+  await database.assignment.create({
+    data: {
+      id: randomUUID(),
+      organizationId,
+      serviceRequestId: activeRequestId,
+      operatorId: operatorIds.atCapacity,
+      status: "ACTIVE",
+      createdAt: ACTIVE_ASSIGNMENT_AT,
+    },
+  });
 
   return {
     organizationId,
+    otherOrganizationId,
     skillId,
-    operatorId,
     serviceRequestId,
+    operatorIds,
   };
 }
 
-async function clearCandidateFixture(fixture: CandidateFixture): Promise<void> {
+async function clearCandidateAuditFixture(
+  fixture: CandidateAuditFixture,
+): Promise<void> {
+  const organizationIds = [fixture.organizationId, fixture.otherOrganizationId];
+
+  await database.webhookDelivery.deleteMany({
+    where: {
+      organizationId: {
+        in: organizationIds,
+      },
+    },
+  });
+
+  await database.outboxEvent.deleteMany({
+    where: {
+      organizationId: {
+        in: organizationIds,
+      },
+    },
+  });
+
+  await database.routingDecision.deleteMany({
+    where: {
+      organizationId: {
+        in: organizationIds,
+      },
+    },
+  });
+
   await database.assignment.deleteMany({
     where: {
-      organizationId: fixture.organizationId,
+      organizationId: {
+        in: organizationIds,
+      },
     },
   });
 
   await database.serviceRequest.deleteMany({
     where: {
-      organizationId: fixture.organizationId,
+      organizationId: {
+        in: organizationIds,
+      },
     },
   });
 
   await database.operatorSkill.deleteMany({
     where: {
-      organizationId: fixture.organizationId,
+      organizationId: {
+        in: organizationIds,
+      },
     },
   });
 
   await database.operator.deleteMany({
     where: {
-      organizationId: fixture.organizationId,
+      organizationId: {
+        in: organizationIds,
+      },
     },
   });
 
   await database.skill.deleteMany({
     where: {
-      organizationId: fixture.organizationId,
+      organizationId: {
+        in: organizationIds,
+      },
     },
   });
 
   await database.organization.deleteMany({
     where: {
-      id: fixture.organizationId,
+      id: {
+        in: organizationIds,
+      },
     },
   });
 }
@@ -165,12 +324,8 @@ afterAll(async () => {
 });
 
 describe("loadRoutingCandidates", () => {
-  it("loads decision-time facts for a routable request", async () => {
-    const fixture = await createCandidateFixture({
-      maxConcurrentAssignments: 2,
-      requiredSkillLevel: 4,
-      activeAssignmentCount: 0,
-    });
+  it("loads all relevant same-organization facts without prefiltering hard rejections", async () => {
+    const fixture = await createCandidateAuditFixture();
 
     try {
       const rows = await loadRoutingCandidates(database, {
@@ -178,61 +333,100 @@ describe("loadRoutingCandidates", () => {
         serviceRequestId: fixture.serviceRequestId,
       });
 
-      expect(rows).toEqual([
-        {
-          operatorId: fixture.operatorId,
-          organizationId: fixture.organizationId,
-          status: "AVAILABLE",
-          region: "WEST",
-          maxConcurrentAssignments: 2,
-          activeAssignmentCount: 0,
-          requiredSkillId: fixture.skillId,
-          requiredSkillLevel: 4,
-          hasRequiredSkill: true,
-        },
-      ]);
-    } finally {
-      await clearCandidateFixture(fixture);
-    }
-  });
+      const expectedOperatorIds = [
+        fixture.operatorIds.eligible,
+        fixture.operatorIds.unavailable,
+        fixture.operatorIds.wrongRegion,
+        fixture.operatorIds.missingSkill,
+        fixture.operatorIds.atCapacity,
+      ].sort();
 
-  it("loads the at-capacity candidate facts for an unroutable request", async () => {
-    const fixture = await createCandidateFixture({
-      maxConcurrentAssignments: 1,
-      requiredSkillLevel: 5,
-      activeAssignmentCount: 1,
-    });
+      expect(rows.map((row) => row.operatorId)).toEqual(expectedOperatorIds);
 
-    try {
-      const rows = await loadRoutingCandidates(database, {
+      const candidatesById = new Map(
+        rows.map((row) => [row.operatorId, row] as const),
+      );
+
+      expect(candidatesById.get(fixture.operatorIds.eligible)).toEqual({
+        operatorId: fixture.operatorIds.eligible,
         organizationId: fixture.organizationId,
-        serviceRequestId: fixture.serviceRequestId,
+        status: "AVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 4,
+        activeAssignmentCount: 0,
+        requiredSkillId: fixture.skillId,
+        requiredSkillLevel: 4,
+        hasRequiredSkill: true,
+        lastAssignedAt: HISTORICAL_ASSIGNMENT_AT,
+        totalAssignmentCount: 1,
       });
 
-      expect(rows).toEqual([
-        {
-          operatorId: fixture.operatorId,
-          organizationId: fixture.organizationId,
-          status: "AVAILABLE",
-          region: "WEST",
-          maxConcurrentAssignments: 1,
-          activeAssignmentCount: 1,
-          requiredSkillId: fixture.skillId,
-          requiredSkillLevel: 5,
-          hasRequiredSkill: true,
-        },
-      ]);
+      expect(candidatesById.get(fixture.operatorIds.unavailable)).toEqual({
+        operatorId: fixture.operatorIds.unavailable,
+        organizationId: fixture.organizationId,
+        status: "UNAVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 4,
+        activeAssignmentCount: 0,
+        requiredSkillId: fixture.skillId,
+        requiredSkillLevel: 3,
+        hasRequiredSkill: true,
+        lastAssignedAt: null,
+        totalAssignmentCount: 0,
+      });
+
+      expect(candidatesById.get(fixture.operatorIds.wrongRegion)).toEqual({
+        operatorId: fixture.operatorIds.wrongRegion,
+        organizationId: fixture.organizationId,
+        status: "AVAILABLE",
+        region: "EAST",
+        maxConcurrentAssignments: 4,
+        activeAssignmentCount: 0,
+        requiredSkillId: fixture.skillId,
+        requiredSkillLevel: 5,
+        hasRequiredSkill: true,
+        lastAssignedAt: null,
+        totalAssignmentCount: 0,
+      });
+
+      expect(candidatesById.get(fixture.operatorIds.missingSkill)).toEqual({
+        operatorId: fixture.operatorIds.missingSkill,
+        organizationId: fixture.organizationId,
+        status: "AVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 4,
+        activeAssignmentCount: 0,
+        requiredSkillId: fixture.skillId,
+        requiredSkillLevel: null,
+        hasRequiredSkill: false,
+        lastAssignedAt: null,
+        totalAssignmentCount: 0,
+      });
+
+      expect(candidatesById.get(fixture.operatorIds.atCapacity)).toEqual({
+        operatorId: fixture.operatorIds.atCapacity,
+        organizationId: fixture.organizationId,
+        status: "AVAILABLE",
+        region: "WEST",
+        maxConcurrentAssignments: 1,
+        activeAssignmentCount: 1,
+        requiredSkillId: fixture.skillId,
+        requiredSkillLevel: 5,
+        hasRequiredSkill: true,
+        lastAssignedAt: ACTIVE_ASSIGNMENT_AT,
+        totalAssignmentCount: 1,
+      });
+
+      expect(candidatesById.has(fixture.operatorIds.otherOrganization)).toBe(
+        false,
+      );
     } finally {
-      await clearCandidateFixture(fixture);
+      await clearCandidateAuditFixture(fixture);
     }
   });
 
-  it("returns equal rows across repeated evaluation", async () => {
-    const fixture = await createCandidateFixture({
-      maxConcurrentAssignments: 2,
-      requiredSkillLevel: 4,
-      activeAssignmentCount: 0,
-    });
+  it("returns equal facts and stable ordering across repeated loads", async () => {
+    const fixture = await createCandidateAuditFixture();
 
     try {
       const first = await loadRoutingCandidates(database, {
@@ -246,9 +440,15 @@ describe("loadRoutingCandidates", () => {
       });
 
       expect(first).toEqual(second);
-      expect(first[0]?.operatorId).toBe(fixture.operatorId);
+
+      expect(first.map((candidate) => candidate.operatorId)).toEqual(
+        first
+          .map((candidate) => candidate.operatorId)
+          .slice()
+          .sort(),
+      );
     } finally {
-      await clearCandidateFixture(fixture);
+      await clearCandidateAuditFixture(fixture);
     }
   });
 });

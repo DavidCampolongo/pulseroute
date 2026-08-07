@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { Prisma, type DatabaseClient } from "@pulseroute/db";
 import {
-  SCORING_VERSION,
   evaluateRoutingPlan,
+  LEGACY_SCORING_VERSION,
   type RoutingCandidateInput,
 } from "@pulseroute/scoring";
 import type { RouteServiceRequestJobData } from "@pulseroute/shared";
@@ -22,6 +22,8 @@ import {
   parseRouteServiceRequestJobData,
   type LockedServiceRequest,
 } from "./routing-transaction.js";
+
+const SCORING_VERSION = LEGACY_SCORING_VERSION;
 
 type TransactionClient = Pick<
   DatabaseClient,
