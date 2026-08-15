@@ -53,6 +53,8 @@ const HOUR_MS = 60 * 60 * 1_000;
 const FAIRNESS_WINDOW_HOURS = 168;
 const MAX_SUPPORTED_SKILL_LEVEL = 5;
 const EXPERIENCE_ASSIGNMENT_CAP = 20;
+const ISO_TIMESTAMP_WITH_TIMEZONE_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 const FACTOR_ORDER: readonly ScoringFactorCode[] = [
   SCORING_FACTOR_CODES.requiredSkillStrength,
@@ -124,10 +126,18 @@ function assertPositiveInteger(value: number, name: string): void {
 }
 
 function parseTimestamp(value: string, name: string): number {
+  if (!ISO_TIMESTAMP_WITH_TIMEZONE_PATTERN.test(value)) {
+    throw new Error(
+      `${name} must be an ISO timestamp with an explicit timezone`,
+    );
+  }
+
   const timestamp = Date.parse(value);
 
   if (!Number.isFinite(timestamp)) {
-    throw new Error(`${name} must be a valid ISO timestamp`);
+    throw new Error(
+      `${name} must be an ISO timestamp with an explicit timezone`,
+    );
   }
 
   return timestamp;
@@ -168,10 +178,11 @@ function assertScoringInput(input: ScoringInput): number {
     if (
       candidate.requiredSkillLevel !== null &&
       (!Number.isInteger(candidate.requiredSkillLevel) ||
-        candidate.requiredSkillLevel < 0)
+        candidate.requiredSkillLevel < 1 ||
+        candidate.requiredSkillLevel > MAX_SUPPORTED_SKILL_LEVEL)
     ) {
       throw new Error(
-        `Candidate ${candidate.operatorId} requiredSkillLevel must be null or a non-negative integer`,
+        `Candidate ${candidate.operatorId} requiredSkillLevel must be null or an integer from 1 to ${MAX_SUPPORTED_SKILL_LEVEL}`,
       );
     }
 
@@ -471,162 +482,6 @@ export function scoreRoutingCandidates(input: ScoringInput): ScoringResult {
     evaluatedAt: input.evaluatedAt,
     outcome: selectedOperatorId === null ? "UNROUTABLE" : "ASSIGNED",
     weightProfile,
-    selectedOperatorId,
-    rankedEligibleCandidates,
-    rejectedCandidates,
-  };
-}
-
-/**
- * Temporary Phase 7 compatibility surface.
- *
- * The worker removes this adapter in Milestone 8 when it begins supplying the
- * complete ScoringInput, including evaluatedAt and historical assignment facts.
- */
-export const LEGACY_SCORING_VERSION = "phase-7-stub-v1" as const;
-
-export const LEGACY_REJECTION_REASONS = {
-  statusNotEligible: "STATUS_NOT_ELIGIBLE",
-  regionMismatch: "REGION_MISMATCH",
-  missingRequiredSkill: "MISSING_REQUIRED_SKILL",
-  atCapacity: "AT_CAPACITY",
-} as const;
-
-export type LegacyRejectionReasonCode =
-  (typeof LEGACY_REJECTION_REASONS)[keyof typeof LEGACY_REJECTION_REASONS];
-
-export type RoutingOutcome = "ASSIGNED" | "UNROUTABLE";
-
-export type RoutingRequestContext = {
-  organizationId: string;
-  serviceRequestId: string;
-  requiredSkillId: string;
-  region: string;
-  priority: "LOW" | "NORMAL" | "HIGH";
-};
-
-export type RoutingCandidateInput = {
-  operatorId: string;
-  organizationId: string;
-  status: "AVAILABLE" | "UNAVAILABLE" | "INACTIVE";
-  region: string;
-  maxConcurrentAssignments: number;
-  activeAssignmentCount: number;
-  requiredSkillLevel: number | null;
-  hasRequiredSkill: boolean;
-};
-
-export type RejectedRoutingCandidate = {
-  operatorId: string;
-  rejectionReasons: LegacyRejectionReasonCode[];
-};
-
-export type RankedRoutingCandidate = {
-  operatorId: string;
-  activeAssignmentCount: number;
-  requiredSkillLevel: number;
-  rank: number;
-};
-
-export type RoutingDecisionPlan = {
-  scoringVersion: typeof LEGACY_SCORING_VERSION;
-  outcome: RoutingOutcome;
-  selectedOperatorId: string | null;
-  rankedEligibleCandidates: RankedRoutingCandidate[];
-  rejectedCandidates: RejectedRoutingCandidate[];
-};
-
-function uniqueLegacyReasons(
-  reasons: LegacyRejectionReasonCode[],
-): LegacyRejectionReasonCode[] {
-  return [...new Set(reasons)];
-}
-
-function compareLegacyCandidates(
-  left: {
-    operatorId: string;
-    activeAssignmentCount: number;
-    requiredSkillLevel: number;
-  },
-  right: {
-    operatorId: string;
-    activeAssignmentCount: number;
-    requiredSkillLevel: number;
-  },
-): number {
-  if (left.activeAssignmentCount !== right.activeAssignmentCount) {
-    return left.activeAssignmentCount - right.activeAssignmentCount;
-  }
-
-  if (left.requiredSkillLevel !== right.requiredSkillLevel) {
-    return right.requiredSkillLevel - left.requiredSkillLevel;
-  }
-
-  return compareStrings(left.operatorId, right.operatorId);
-}
-
-export function evaluateRoutingPlan(
-  request: RoutingRequestContext,
-  candidates: readonly RoutingCandidateInput[],
-): RoutingDecisionPlan {
-  const eligible: Array<{
-    operatorId: string;
-    activeAssignmentCount: number;
-    requiredSkillLevel: number;
-  }> = [];
-
-  const rejectedCandidates: RejectedRoutingCandidate[] = [];
-
-  for (const candidate of candidates) {
-    const rejectionReasons: LegacyRejectionReasonCode[] = [];
-
-    if (candidate.status !== "AVAILABLE") {
-      rejectionReasons.push(LEGACY_REJECTION_REASONS.statusNotEligible);
-    }
-
-    if (candidate.region !== request.region) {
-      rejectionReasons.push(LEGACY_REJECTION_REASONS.regionMismatch);
-    }
-
-    if (!candidate.hasRequiredSkill) {
-      rejectionReasons.push(LEGACY_REJECTION_REASONS.missingRequiredSkill);
-    }
-
-    if (candidate.activeAssignmentCount >= candidate.maxConcurrentAssignments) {
-      rejectionReasons.push(LEGACY_REJECTION_REASONS.atCapacity);
-    }
-
-    if (rejectionReasons.length > 0) {
-      rejectedCandidates.push({
-        operatorId: candidate.operatorId,
-        rejectionReasons: uniqueLegacyReasons(rejectionReasons),
-      });
-
-      continue;
-    }
-
-    eligible.push({
-      operatorId: candidate.operatorId,
-      activeAssignmentCount: candidate.activeAssignmentCount,
-      requiredSkillLevel: candidate.requiredSkillLevel ?? 0,
-    });
-  }
-
-  const rankedEligibleCandidates = eligible
-    .slice()
-    .sort(compareLegacyCandidates)
-    .map((candidate, index) => ({
-      operatorId: candidate.operatorId,
-      activeAssignmentCount: candidate.activeAssignmentCount,
-      requiredSkillLevel: candidate.requiredSkillLevel,
-      rank: index + 1,
-    }));
-
-  const selectedOperatorId = rankedEligibleCandidates[0]?.operatorId ?? null;
-
-  return {
-    scoringVersion: LEGACY_SCORING_VERSION,
-    outcome: selectedOperatorId === null ? "UNROUTABLE" : "ASSIGNED",
     selectedOperatorId,
     rankedEligibleCandidates,
     rejectedCandidates,

@@ -81,6 +81,61 @@ function getFactor(
   return factor;
 }
 
+describe("scoreRoutingCandidates input contract", () => {
+  it.each([
+    {
+      name: "evaluatedAt",
+      input: {
+        ...createInput([]),
+        evaluatedAt: "2026-08-06T16:00:00.000",
+      },
+    },
+    {
+      name: "lastAssignedAt",
+      input: createInput([
+        createCandidate({
+          operatorId: "operator-1",
+          lastAssignedAt: "2026-08-06T16:00:00.000",
+        }),
+      ]),
+    },
+  ])("rejects $name without an explicit timezone", ({ input }) => {
+    expect(() => scoreRoutingCandidates(input)).toThrow(
+      "must be an ISO timestamp with an explicit timezone",
+    );
+  });
+
+  it.each([0, 6, 1.5])(
+    "rejects invalid required skill level %s",
+    (requiredSkillLevel) => {
+      const input = createInput([
+        createCandidate({
+          operatorId: "operator-1",
+          requiredSkillLevel,
+        }),
+      ]);
+
+      expect(() => scoreRoutingCandidates(input)).toThrow(
+        "requiredSkillLevel must be null or an integer from 1 to 5",
+      );
+    },
+  );
+
+  it("returns a JSON-compatible result", () => {
+    const result = scoreRoutingCandidates(
+      createInput([
+        createCandidate({ operatorId: "operator-eligible" }),
+        createCandidate({
+          operatorId: "operator-rejected",
+          status: "UNAVAILABLE",
+        }),
+      ]),
+    );
+
+    expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+  });
+});
+
 describe("scoreRoutingCandidates hard filters", () => {
   const cases: Array<{
     name: string;
@@ -309,6 +364,13 @@ describe("scoreRoutingCandidates factors", () => {
       expectedRawValue: 84,
       expectedNormalizedValue: 50,
       expectedContribution: 1_250,
+    },
+    {
+      name: "assigned at evaluation time",
+      lastAssignedAt: EVALUATED_AT,
+      expectedRawValue: 0,
+      expectedNormalizedValue: 0,
+      expectedContribution: 0,
     },
     {
       name: "assigned six hours ago",

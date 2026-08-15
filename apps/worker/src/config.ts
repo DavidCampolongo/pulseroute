@@ -40,6 +40,8 @@ const environmentSchema = z.object({
     "trace",
     "silent",
   ]),
+
+  FAULT_INJECT_SCORING: z.enum(["true", "false"]).default("false"),
 });
 
 export type WorkerConfig = {
@@ -47,6 +49,7 @@ export type WorkerConfig = {
   databaseUrl: string;
   redisUrl: string;
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
+  faultInjectScoring: boolean;
 };
 
 export function parseWorkerConfig(
@@ -74,5 +77,6 @@ export function parseWorkerConfig(
     databaseUrl: result.data.DATABASE_URL,
     redisUrl: result.data.REDIS_URL,
     logLevel: result.data.LOG_LEVEL,
+    faultInjectScoring: result.data.FAULT_INJECT_SCORING === "true",
   };
 }

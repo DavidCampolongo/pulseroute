@@ -1,15 +1,5 @@
 import { Prisma, type DatabaseClient } from "@pulseroute/db";
 
-export const REJECTION_REASONS = {
-  statusNotEligible: "STATUS_NOT_ELIGIBLE",
-  regionMismatch: "REGION_MISMATCH",
-  missingRequiredSkill: "MISSING_REQUIRED_SKILL",
-  atCapacity: "AT_CAPACITY",
-} as const;
-
-export type RejectionReasonCode =
-  (typeof REJECTION_REASONS)[keyof typeof REJECTION_REASONS];
-
 export type RoutingCandidateQueryInput = {
   organizationId: string;
   serviceRequestId: string;

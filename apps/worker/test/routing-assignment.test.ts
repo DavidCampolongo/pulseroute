@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { createDatabaseClient } from "@pulseroute/db";
+import {
+  SCORING_FACTOR_CODES,
+  SCORING_REJECTION_REASON_CODES,
+  SCORING_VERSION,
+} from "@pulseroute/scoring";
 import { config as loadEnvironmentFile } from "dotenv";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -19,6 +24,7 @@ if (!databaseUrl) {
 }
 
 const database = createDatabaseClient(databaseUrl);
+const EVALUATED_AT = "2026-08-15T12:00:00.000Z";
 
 type RoutingFixture = {
   organizationId: string;
@@ -31,6 +37,57 @@ type RoutingFixtureOptions = {
   maxConcurrentAssignments: number;
   requiredSkillLevel: number;
   activeAssignmentCount: number;
+};
+
+type RejectedSnapshotCandidate = {
+  operatorId: string;
+  reasons: string[];
+  observedFacts: {
+    status: string;
+    region: string;
+    maxConcurrentAssignments: number;
+    activeAssignmentCount: number;
+    requiredSkillLevel: number | null;
+  };
+};
+
+type DecisionSnapshot = {
+  scoringVersion: string;
+  evaluatedAt: string;
+  scoring: {
+    initialSelectedOperatorId: string | null;
+    weightProfile: {
+      profileCode: string;
+      weights: Record<string, number>;
+    };
+    rankedEligibleCandidates: Array<{
+      operatorId: string;
+      rank: number;
+      totalScore: number;
+      factors: Array<{
+        factorCode: string;
+        rawValue: string | number | null;
+        normalizedValue: number;
+        weight: number;
+        contribution: number;
+      }>;
+    }>;
+    rejectedCandidates: RejectedSnapshotCandidate[];
+  };
+  lockTimeOutcomes: Array<{
+    operatorId: string;
+    scoringRank: number;
+    outcome: string;
+    reasons?: string[];
+  }>;
+  result: {
+    outcome: string;
+    initialSelectedOperatorId: string | null;
+    selectedOperatorId: string | null;
+    fallbackUsed?: boolean;
+    unroutableReason?: string;
+    rejectionReasons?: string[];
+  };
 };
 
 async function createRoutingFixture(
@@ -183,7 +240,7 @@ afterAll(async () => {
 });
 
 describe("executeRouteServiceRequest", () => {
-  it("creates the assignment, routing decision, request transition, and outbox intent in one transaction", async () => {
+  it("creates one explainable assignment decision and versioned notification atomically", async () => {
     const fixture = await createRoutingFixture({
       maxConcurrentAssignments: 2,
       requiredSkillLevel: 4,
@@ -191,11 +248,17 @@ describe("executeRouteServiceRequest", () => {
     });
 
     try {
-      const result = await executeRouteServiceRequest(database, {
-        organizationId: fixture.organizationId,
-        serviceRequestId: fixture.serviceRequestId,
-        correlationId: `request-${randomUUID()}`,
-      });
+      const result = await executeRouteServiceRequest(
+        database,
+        {
+          organizationId: fixture.organizationId,
+          serviceRequestId: fixture.serviceRequestId,
+          correlationId: `request-${randomUUID()}`,
+        },
+        {
+          now: () => new Date(EVALUATED_AT),
+        },
+      );
 
       expect(result.kind).toBe("assigned");
 
@@ -238,7 +301,7 @@ describe("executeRouteServiceRequest", () => {
         organizationId: fixture.organizationId,
         serviceRequestId: fixture.serviceRequestId,
         assignmentId: assignment.id,
-        scoringVersion: "phase-7-stub-v1",
+        scoringVersion: SCORING_VERSION,
         outcome: "ASSIGNED",
       });
 
@@ -258,11 +321,15 @@ describe("executeRouteServiceRequest", () => {
         operatorId: fixture.operatorId,
         assignmentId: assignment.id,
         routingDecisionId: routingDecision.id,
-        scoringVersion: "phase-7-stub-v1",
+        scoringVersion: SCORING_VERSION,
       });
 
-      expect(routingDecision.decisionSnapshot).toMatchObject({
-        scoringVersion: "phase-7-stub-v1",
+      const snapshot =
+        routingDecision.decisionSnapshot as unknown as DecisionSnapshot;
+
+      expect(snapshot).toMatchObject({
+        scoringVersion: SCORING_VERSION,
+        evaluatedAt: EVALUATED_AT,
         request: {
           id: fixture.serviceRequestId,
           organizationId: fixture.organizationId,
@@ -271,17 +338,61 @@ describe("executeRouteServiceRequest", () => {
           region: "WEST",
           status: "PENDING",
         },
+        scoring: {
+          outcome: "ASSIGNED",
+          initialSelectedOperatorId: fixture.operatorId,
+          rejectedCandidates: [],
+        },
+        lockTimeOutcomes: [
+          {
+            operatorId: fixture.operatorId,
+            scoringRank: 1,
+            outcome: "ACCEPTED",
+          },
+        ],
         result: {
           outcome: "ASSIGNED",
+          initialSelectedOperatorId: fixture.operatorId,
           selectedOperatorId: fixture.operatorId,
+          fallbackUsed: false,
         },
       });
+
+      expect(snapshot.scoring.rankedEligibleCandidates).toHaveLength(1);
+
+      const scoredCandidate = snapshot.scoring.rankedEligibleCandidates[0]!;
+
+      expect(scoredCandidate).toMatchObject({
+        operatorId: fixture.operatorId,
+        rank: 1,
+      });
+      expect(scoredCandidate.totalScore).toBeGreaterThan(0);
+      expect(
+        scoredCandidate.factors.map((factor) => factor.factorCode),
+      ).toEqual([
+        SCORING_FACTOR_CODES.requiredSkillStrength,
+        SCORING_FACTOR_CODES.loadHeadroom,
+        SCORING_FACTOR_CODES.assignmentFairness,
+        SCORING_FACTOR_CODES.assignmentExperience,
+      ]);
+
+      for (const factor of scoredCandidate.factors) {
+        expect(factor).toEqual(
+          expect.objectContaining({
+            factorCode: expect.any(String),
+            normalizedValue: expect.any(Number),
+            weight: expect.any(Number),
+            contribution: expect.any(Number),
+          }),
+        );
+        expect(factor).toHaveProperty("rawValue");
+      }
     } finally {
       await clearRoutingFixture(fixture);
     }
   });
 
-  it("creates an unroutable routing decision with no assignment and no notification outbox event", async () => {
+  it("creates an explainable unroutable decision without assignment or notification", async () => {
     const fixture = await createRoutingFixture({
       maxConcurrentAssignments: 1,
       requiredSkillLevel: 5,
@@ -289,11 +400,17 @@ describe("executeRouteServiceRequest", () => {
     });
 
     try {
-      const result = await executeRouteServiceRequest(database, {
-        organizationId: fixture.organizationId,
-        serviceRequestId: fixture.serviceRequestId,
-        correlationId: `request-${randomUUID()}`,
-      });
+      const result = await executeRouteServiceRequest(
+        database,
+        {
+          organizationId: fixture.organizationId,
+          serviceRequestId: fixture.serviceRequestId,
+          correlationId: `request-${randomUUID()}`,
+        },
+        {
+          now: () => new Date(EVALUATED_AT),
+        },
+      );
 
       expect(result.kind).toBe("unroutable");
 
@@ -327,42 +444,219 @@ describe("executeRouteServiceRequest", () => {
         },
       });
 
-      const activeOperatorAssignments = await database.assignment.count({
-        where: {
-          organizationId: fixture.organizationId,
-          operatorId: fixture.operatorId,
-          status: "ACTIVE",
-        },
-      });
-
-      expect(result.rejectionReasons).toContain("AT_CAPACITY");
+      expect(result.rejectionReasons).toEqual([
+        SCORING_REJECTION_REASON_CODES.atCapacity,
+      ]);
 
       expect(routingDecision).toMatchObject({
         organizationId: fixture.organizationId,
         serviceRequestId: fixture.serviceRequestId,
         assignmentId: null,
-        scoringVersion: "phase-7-stub-v1",
+        scoringVersion: SCORING_VERSION,
         outcome: "UNROUTABLE",
       });
 
       expect(serviceRequest.status).toBe("UNROUTABLE");
       expect(targetAssignments).toHaveLength(0);
       expect(targetOutboxEvents).toHaveLength(0);
-      expect(activeOperatorAssignments).toBe(1);
 
-      expect(routingDecision.decisionSnapshot).toMatchObject({
-        scoringVersion: "phase-7-stub-v1",
-        request: {
-          id: fixture.serviceRequestId,
+      const snapshot =
+        routingDecision.decisionSnapshot as unknown as DecisionSnapshot;
+
+      expect(snapshot).toMatchObject({
+        scoringVersion: SCORING_VERSION,
+        evaluatedAt: EVALUATED_AT,
+        scoring: {
+          outcome: "UNROUTABLE",
+          initialSelectedOperatorId: null,
+          rankedEligibleCandidates: [],
+          rejectedCandidates: [
+            {
+              operatorId: fixture.operatorId,
+              reasons: [SCORING_REJECTION_REASON_CODES.atCapacity],
+              observedFacts: {
+                activeAssignmentCount: 1,
+                maxConcurrentAssignments: 1,
+              },
+            },
+          ],
+        },
+        lockTimeOutcomes: [],
+        result: {
+          outcome: "UNROUTABLE",
+          initialSelectedOperatorId: null,
+          selectedOperatorId: null,
+          unroutableReason: "ALL_CANDIDATES_REJECTED_AT_SCORING",
+          rejectionReasons: [SCORING_REJECTION_REASON_CODES.atCapacity],
+        },
+      });
+    } finally {
+      await clearRoutingFixture(fixture);
+    }
+  });
+
+  it("persists database-backed evidence for every scoring hard filter", async () => {
+    const fixture = await createRoutingFixture({
+      maxConcurrentAssignments: 3,
+      requiredSkillLevel: 4,
+      activeAssignmentCount: 0,
+    });
+
+    const rejectedOperatorIds = {
+      unavailable: randomUUID(),
+      wrongRegion: randomUUID(),
+      missingSkill: randomUUID(),
+      atCapacity: randomUUID(),
+    };
+
+    try {
+      await database.operator.createMany({
+        data: [
+          {
+            id: rejectedOperatorIds.unavailable,
+            organizationId: fixture.organizationId,
+            name: "Hard Filter Unavailable",
+            status: "UNAVAILABLE",
+            region: "WEST",
+            maxConcurrentAssignments: 3,
+          },
+          {
+            id: rejectedOperatorIds.wrongRegion,
+            organizationId: fixture.organizationId,
+            name: "Hard Filter Wrong Region",
+            status: "AVAILABLE",
+            region: "EAST",
+            maxConcurrentAssignments: 3,
+          },
+          {
+            id: rejectedOperatorIds.missingSkill,
+            organizationId: fixture.organizationId,
+            name: "Hard Filter Missing Skill",
+            status: "AVAILABLE",
+            region: "WEST",
+            maxConcurrentAssignments: 3,
+          },
+          {
+            id: rejectedOperatorIds.atCapacity,
+            organizationId: fixture.organizationId,
+            name: "Hard Filter At Capacity",
+            status: "AVAILABLE",
+            region: "WEST",
+            maxConcurrentAssignments: 1,
+          },
+        ],
+      });
+
+      await database.operatorSkill.createMany({
+        data: [
+          {
+            organizationId: fixture.organizationId,
+            operatorId: rejectedOperatorIds.unavailable,
+            skillId: fixture.skillId,
+            level: 4,
+          },
+          {
+            organizationId: fixture.organizationId,
+            operatorId: rejectedOperatorIds.wrongRegion,
+            skillId: fixture.skillId,
+            level: 5,
+          },
+          {
+            organizationId: fixture.organizationId,
+            operatorId: rejectedOperatorIds.atCapacity,
+            skillId: fixture.skillId,
+            level: 5,
+          },
+        ],
+      });
+
+      const capacityRequestId = randomUUID();
+
+      await database.serviceRequest.create({
+        data: {
+          id: capacityRequestId,
           organizationId: fixture.organizationId,
+          externalId: `hard-filter-capacity-${capacityRequestId}`,
           requiredSkillId: fixture.skillId,
-          status: "PENDING",
+          status: "ASSIGNED",
           priority: "NORMAL",
           region: "WEST",
         },
-        result: {
-          outcome: "UNROUTABLE",
-          selectedOperatorId: null,
+      });
+
+      await database.assignment.create({
+        data: {
+          id: randomUUID(),
+          organizationId: fixture.organizationId,
+          serviceRequestId: capacityRequestId,
+          operatorId: rejectedOperatorIds.atCapacity,
+          status: "ACTIVE",
+        },
+      });
+
+      const result = await executeRouteServiceRequest(
+        database,
+        {
+          organizationId: fixture.organizationId,
+          serviceRequestId: fixture.serviceRequestId,
+          correlationId: `hard-filter-${randomUUID()}`,
+        },
+        {
+          now: () => new Date(EVALUATED_AT),
+        },
+      );
+
+      expect(result.kind).toBe("assigned");
+
+      if (result.kind !== "assigned") {
+        throw new Error("Expected the eligible operator to be assigned");
+      }
+
+      const routingDecision = await database.routingDecision.findUniqueOrThrow({
+        where: {
+          id: result.routingDecisionId,
+        },
+      });
+
+      const snapshot =
+        routingDecision.decisionSnapshot as unknown as DecisionSnapshot;
+      const rejectedById = new Map(
+        snapshot.scoring.rejectedCandidates.map((candidate) => [
+          candidate.operatorId,
+          candidate,
+        ]),
+      );
+
+      expect(snapshot.scoring.rankedEligibleCandidates).toHaveLength(1);
+      expect(snapshot.scoring.rejectedCandidates).toHaveLength(4);
+      expect(result.operatorId).toBe(fixture.operatorId);
+
+      expect(rejectedById.get(rejectedOperatorIds.unavailable)).toMatchObject({
+        reasons: [SCORING_REJECTION_REASON_CODES.operatorNotAvailable],
+        observedFacts: {
+          status: "UNAVAILABLE",
+        },
+      });
+
+      expect(rejectedById.get(rejectedOperatorIds.wrongRegion)).toMatchObject({
+        reasons: [SCORING_REJECTION_REASON_CODES.regionIncompatible],
+        observedFacts: {
+          region: "EAST",
+        },
+      });
+
+      expect(rejectedById.get(rejectedOperatorIds.missingSkill)).toMatchObject({
+        reasons: [SCORING_REJECTION_REASON_CODES.missingRequiredSkill],
+        observedFacts: {
+          requiredSkillLevel: null,
+        },
+      });
+
+      expect(rejectedById.get(rejectedOperatorIds.atCapacity)).toMatchObject({
+        reasons: [SCORING_REJECTION_REASON_CODES.atCapacity],
+        observedFacts: {
+          activeAssignmentCount: 1,
+          maxConcurrentAssignments: 1,
         },
       });
     } finally {
