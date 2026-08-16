@@ -30,6 +30,19 @@ describe("parseConfig", () => {
     expect(typeof config.webhookToleranceSeconds).toBe("number");
   });
 
+  it("uses Railway PORT and an all-interface host in production", () => {
+    const config = parseConfig({
+      ...validEnvironment,
+      NODE_ENV: "production",
+      API_HOST: undefined,
+      API_PORT: "3000",
+      PORT: "4310",
+    });
+
+    expect(config.host).toBe("0.0.0.0");
+    expect(config.port).toBe(4_310);
+  });
+
   it("rejects a missing required variable", () => {
     const environment = {
       ...validEnvironment,
@@ -43,6 +56,15 @@ describe("parseConfig", () => {
     const environment = {
       ...validEnvironment,
       API_PORT: "banana",
+    };
+
+    expect(() => parseConfig(environment)).toThrow(/API_PORT/);
+  });
+
+  it("rejects an invalid Railway port", () => {
+    const environment = {
+      ...validEnvironment,
+      PORT: "banana",
     };
 
     expect(() => parseConfig(environment)).toThrow(/API_PORT/);

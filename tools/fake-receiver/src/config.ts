@@ -2,11 +2,14 @@ export const FAKE_RECEIVER_MODES = ["success", "failure", "timeout"] as const;
 
 export type FakeReceiverMode = (typeof FAKE_RECEIVER_MODES)[number];
 
+export const DEFAULT_RECEIVER_HOST = "127.0.0.1";
+export const PRODUCTION_RECEIVER_HOST = "0.0.0.0";
 export const DEFAULT_RECEIVER_PORT = 3_100;
 export const DEFAULT_RECEIVER_DELAY_MS = 5_000;
 export const MAX_RECEIVER_DELAY_MS = 60_000;
 
 export type FakeReceiverConfig = {
+  host: string;
   port: number;
   outboundWebhookSecret: string;
   mode: FakeReceiverMode;
@@ -54,10 +57,11 @@ export function parseFakeReceiverConfig(
   environment: Record<string, string | undefined>,
 ): FakeReceiverConfig {
   const problems: string[] = [];
+  const railwayPort = environment.PORT;
 
   const port = parseBoundedInteger({
-    name: "RECEIVER_PORT",
-    rawValue: environment.RECEIVER_PORT,
+    name: railwayPort === undefined ? "RECEIVER_PORT" : "PORT",
+    rawValue: railwayPort ?? environment.RECEIVER_PORT,
     defaultValue: DEFAULT_RECEIVER_PORT,
     minimum: 1,
     maximum: 65_535,
@@ -105,6 +109,10 @@ export function parseFakeReceiverConfig(
   }
 
   return {
+    host:
+      environment.NODE_ENV === "production"
+        ? PRODUCTION_RECEIVER_HOST
+        : DEFAULT_RECEIVER_HOST,
     port,
     outboundWebhookSecret: outboundWebhookSecret!,
     mode: rawMode as FakeReceiverMode,

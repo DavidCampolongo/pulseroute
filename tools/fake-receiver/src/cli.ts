@@ -3,7 +3,7 @@ import process, { loadEnvFile } from "node:process";
 import { fileURLToPath, URL } from "node:url";
 
 import { parseFakeReceiverConfig } from "./config.js";
-import { FAKE_RECEIVER_HOST, startFakeReceiver } from "./server.js";
+import { startFakeReceiver } from "./server.js";
 
 const rootEnvironmentPath = fileURLToPath(
   new URL("../../../.env", import.meta.url),
@@ -17,7 +17,7 @@ async function run(): Promise<void> {
   const config = parseFakeReceiverConfig(process.env);
   const receiver = await startFakeReceiver({
     secret: config.outboundWebhookSecret,
-    host: FAKE_RECEIVER_HOST,
+    host: config.host,
     port: config.port,
     mode: config.mode,
     delayMs: config.delayMs,

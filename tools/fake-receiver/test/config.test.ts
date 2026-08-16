@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_RECEIVER_DELAY_MS,
+  DEFAULT_RECEIVER_HOST,
   DEFAULT_RECEIVER_PORT,
+  PRODUCTION_RECEIVER_HOST,
   parseFakeReceiverConfig,
 } from "../src/config.js";
 
@@ -15,6 +17,7 @@ describe("parseFakeReceiverConfig", () => {
         OUTBOUND_WEBHOOK_SECRET: validSecret,
       }),
     ).toEqual({
+      host: DEFAULT_RECEIVER_HOST,
       port: DEFAULT_RECEIVER_PORT,
       outboundWebhookSecret: validSecret,
       mode: "success",
@@ -31,10 +34,25 @@ describe("parseFakeReceiverConfig", () => {
         RECEIVER_DELAY_MS: "125",
       }),
     ).toEqual({
+      host: DEFAULT_RECEIVER_HOST,
       port: 4_310,
       outboundWebhookSecret: validSecret,
       mode: "timeout",
       delayMs: 125,
+    });
+  });
+
+  it("uses Railway PORT and binds all interfaces in production", () => {
+    expect(
+      parseFakeReceiverConfig({
+        NODE_ENV: "production",
+        PORT: "8080",
+        RECEIVER_PORT: "4310",
+        OUTBOUND_WEBHOOK_SECRET: validSecret,
+      }),
+    ).toMatchObject({
+      host: PRODUCTION_RECEIVER_HOST,
+      port: 8_080,
     });
   });
 
@@ -63,6 +81,9 @@ describe("parseFakeReceiverConfig", () => {
   });
 
   it.each([
+    ["PORT", "0"],
+    ["PORT", "65536"],
+    ["PORT", "3.5"],
     ["RECEIVER_PORT", "0"],
     ["RECEIVER_PORT", "65536"],
     ["RECEIVER_PORT", "3.5"],

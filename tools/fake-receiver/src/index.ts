@@ -1,8 +1,10 @@
 export {
   DEFAULT_RECEIVER_DELAY_MS,
+  DEFAULT_RECEIVER_HOST,
   DEFAULT_RECEIVER_PORT,
   FAKE_RECEIVER_MODES,
   MAX_RECEIVER_DELAY_MS,
+  PRODUCTION_RECEIVER_HOST,
   parseFakeReceiverConfig,
   type FakeReceiverConfig,
   type FakeReceiverMode,

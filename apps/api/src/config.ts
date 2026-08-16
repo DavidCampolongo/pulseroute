@@ -60,7 +60,14 @@ export type AppConfig = {
 export function parseConfig(
   environment: Record<string, string | undefined>,
 ): AppConfig {
-  const result = environmentSchema.safeParse(environment);
+  const normalizedEnvironment = {
+    ...environment,
+    API_HOST:
+      environment.API_HOST ??
+      (environment.NODE_ENV === "production" ? "0.0.0.0" : undefined),
+    API_PORT: environment.PORT ?? environment.API_PORT,
+  };
+  const result = environmentSchema.safeParse(normalizedEnvironment);
 
   if (!result.success) {
     const problems = result.error.issues.map((issue) => {
