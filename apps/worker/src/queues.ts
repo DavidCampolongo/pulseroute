@@ -3,6 +3,7 @@ import {
   type DeadLetteredJobData,
   type RouteServiceRequestJobData,
   type ServiceRequestIngestedJobData,
+  type WebhookDeliveryJobData,
 } from "@pulseroute/shared";
 import { Queue, type DefaultJobOptions } from "bullmq";
 
@@ -65,7 +66,7 @@ export type PulseRouteQueues = {
   incomingEvents: Queue<ServiceRequestIngestedJobData>;
   routing: Queue<RouteServiceRequestJobData>;
   notifications: Queue<Record<string, never>>;
-  webhookDelivery: Queue<Record<string, never>>;
+  webhookDelivery: Queue<WebhookDeliveryJobData>;
   deadLetter: Queue<DeadLetteredJobData>;
 };
 
@@ -92,7 +93,7 @@ export function createPulseRouteQueues(redisUrl: string): PulseRouteQueues {
       defaultJobOptions: createFutureFacingJobOptions(),
     }),
 
-    webhookDelivery: new Queue<Record<string, never>>(
+    webhookDelivery: new Queue<WebhookDeliveryJobData>(
       QUEUE_NAMES.webhookDelivery,
       {
         connection: createProducerRedisOptions(redisUrl),

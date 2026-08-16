@@ -23,6 +23,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@pulseroute/fake-receiver": "workspace:*",
     "@types/node": "24.13.3",
     "vitest": "4.1.10"
   }

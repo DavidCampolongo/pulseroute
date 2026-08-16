@@ -147,6 +147,9 @@ function startWorkerChild(): ChildProcess {
       LOG_LEVEL: "info",
       DATABASE_URL: databaseUrl,
       REDIS_URL: redisUrl,
+      WEBHOOK_DELIVERY_URL: "http://127.0.0.1:1/webhooks",
+      OUTBOUND_WEBHOOK_SECRET: "shutdown-test-secret-at-least-32-characters",
+      WEBHOOK_DELIVERY_TIMEOUT_MS: "100",
     },
 
     stdio: ["ignore", "pipe", "pipe"],
