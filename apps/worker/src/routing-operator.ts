@@ -1,10 +1,10 @@
 import { Prisma, type DatabaseClient } from "@pulseroute/db";
-
 import {
-  REJECTION_REASONS,
-  type RejectionReasonCode,
-  type RoutingCandidateRow,
-} from "./routing-candidates.js";
+  SCORING_REJECTION_REASON_CODES,
+  type ScoringRejectionReasonCode,
+} from "@pulseroute/scoring";
+
+import type { RoutingCandidateRow } from "./routing-candidates.js";
 import type { LockedServiceRequest } from "./routing-transaction.js";
 
 type QueryableDatabase = Pick<DatabaseClient, "$queryRaw">;
@@ -33,10 +33,12 @@ export type LockedOperatorOutcome =
       operator: LockedOperatorRow | null;
       activeAssignmentCount: number | null;
       requiredSkillLevel: number | null;
-      rejectionReasons: RejectionReasonCode[];
+      rejectionReasons: ScoringRejectionReasonCode[];
     };
 
-function uniqueReasons(reasons: RejectionReasonCode[]): RejectionReasonCode[] {
+function uniqueReasons(
+  reasons: ScoringRejectionReasonCode[],
+): ScoringRejectionReasonCode[] {
   return [...new Set(reasons)];
 }
 
@@ -68,7 +70,7 @@ export async function lockAndRecheckSelectedOperator(
       operator: null,
       activeAssignmentCount: null,
       requiredSkillLevel: null,
-      rejectionReasons: [REJECTION_REASONS.statusNotEligible],
+      rejectionReasons: [SCORING_REJECTION_REASON_CODES.operatorNotAvailable],
     };
   }
 
@@ -98,22 +100,22 @@ export async function lockAndRecheckSelectedOperator(
 
   const requiredSkillLevel = requiredSkillRows[0]?.requiredSkillLevel ?? null;
 
-  const rejectionReasons: RejectionReasonCode[] = [];
+  const rejectionReasons: ScoringRejectionReasonCode[] = [];
 
   if (lockedOperator.status !== "AVAILABLE") {
-    rejectionReasons.push(REJECTION_REASONS.statusNotEligible);
+    rejectionReasons.push(SCORING_REJECTION_REASON_CODES.operatorNotAvailable);
   }
 
   if (lockedOperator.region !== request.region) {
-    rejectionReasons.push(REJECTION_REASONS.regionMismatch);
+    rejectionReasons.push(SCORING_REJECTION_REASON_CODES.regionIncompatible);
   }
 
   if (requiredSkillLevel === null) {
-    rejectionReasons.push(REJECTION_REASONS.missingRequiredSkill);
+    rejectionReasons.push(SCORING_REJECTION_REASON_CODES.missingRequiredSkill);
   }
 
   if (activeAssignmentCount >= lockedOperator.maxConcurrentAssignments) {
-    rejectionReasons.push(REJECTION_REASONS.atCapacity);
+    rejectionReasons.push(SCORING_REJECTION_REASON_CODES.atCapacity);
   }
 
   if (rejectionReasons.length > 0) {

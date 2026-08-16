@@ -11,14 +11,33 @@ const validEnvironment = {
 };
 
 describe("parseWorkerConfig", () => {
-  it("parses valid worker configuration", () => {
+  it("parses valid worker configuration with scoring faults disabled by default", () => {
     expect(parseWorkerConfig(validEnvironment)).toEqual({
       nodeEnv: "test",
       databaseUrl:
         "postgresql://pulseroute:password@127.0.0.1:5432/pulseroute_test",
       redisUrl: "redis://127.0.0.1:6379",
       logLevel: "info",
+      faultInjectScoring: false,
     });
+  });
+
+  it("enables scoring fault injection explicitly", () => {
+    expect(
+      parseWorkerConfig({
+        ...validEnvironment,
+        FAULT_INJECT_SCORING: "true",
+      }).faultInjectScoring,
+    ).toBe(true);
+  });
+
+  it("rejects an invalid scoring fault flag", () => {
+    expect(() =>
+      parseWorkerConfig({
+        ...validEnvironment,
+        FAULT_INJECT_SCORING: "yes",
+      }),
+    ).toThrow("FAULT_INJECT_SCORING");
   });
 
   it("rejects a missing DATABASE_URL", () => {

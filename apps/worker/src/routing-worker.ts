@@ -12,6 +12,11 @@ import { createDeadLetteringProcessor } from "./dead-letter.js";
 import { createJobLogger } from "./logger.js";
 import { createWorkerRedisOptions } from "./redis.js";
 import {
+  createWorkerScorer,
+  type RoutingScorer,
+  type ScoringFaultDecision,
+} from "./scoring.js";
+import {
   executeRouteServiceRequest,
   type RoutingAssignmentResult,
 } from "./routing-workflow.js";
@@ -25,11 +30,20 @@ const routingJobSchema = z.object({
 export type RoutingProcessorOptions = {
   database: DatabaseClient;
   logger: Logger;
+  faultInjectScoring?: boolean;
+  shouldInjectScoringFault?: ScoringFaultDecision;
+  scorer?: RoutingScorer;
 };
 
 export function createRoutingProcessor(
   options: RoutingProcessorOptions,
 ): Processor<RouteServiceRequestJobData, RoutingAssignmentResult, string> {
+  const scorer = createWorkerScorer({
+    faultInjectionEnabled: options.faultInjectScoring ?? false,
+    shouldInjectFault: options.shouldInjectScoringFault,
+    scorer: options.scorer,
+  });
+
   return async (job) => {
     const startedAt = Date.now();
     const parsedJobData = routingJobSchema.parse(job.data);
@@ -44,7 +58,13 @@ export function createRoutingProcessor(
       correlationId: parsedJobData.correlationId,
     });
 
-    const result = await executeRouteServiceRequest(options.database, job.data);
+    const result = await executeRouteServiceRequest(
+      options.database,
+      job.data,
+      {
+        scorer,
+      },
+    );
 
     if (result.kind === "assigned") {
       jobLogger.info(
@@ -100,6 +120,9 @@ export function createRoutingWorker(
     processor: createRoutingProcessor({
       database: options.database,
       logger: options.logger,
+      faultInjectScoring: options.faultInjectScoring,
+      shouldInjectScoringFault: options.shouldInjectScoringFault,
+      scorer: options.scorer,
     }),
     logger: options.logger,
   });

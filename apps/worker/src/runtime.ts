@@ -258,6 +258,7 @@ export async function createWorkerRuntime(
 
     routingWorker = createRoutingWorker({
       database,
+      faultInjectScoring: config.faultInjectScoring,
       deadLetterQueue: queues.deadLetter,
       logger,
       redisUrl: config.redisUrl,

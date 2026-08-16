@@ -2,21 +2,26 @@ import { randomUUID } from "node:crypto";
 
 import { Prisma, type DatabaseClient } from "@pulseroute/db";
 import {
-  SCORING_VERSION,
-  evaluateRoutingPlan,
-  type RoutingCandidateInput,
+  scoreRoutingCandidates,
+  type RejectedCandidate,
+  type ScoredCandidate,
+  type ScoringCandidate,
+  type ScoringInput,
+  type ScoringRejectionReasonCode,
+  type ScoringResult,
+  type ScoringVersion,
 } from "@pulseroute/scoring";
 import type { RouteServiceRequestJobData } from "@pulseroute/shared";
 
 import {
   loadRoutingCandidates,
-  type RejectionReasonCode,
   type RoutingCandidateRow,
 } from "./routing-candidates.js";
 import {
   lockAndRecheckSelectedOperator,
   type LockedOperatorOutcome,
 } from "./routing-operator.js";
+import type { RoutingScorer } from "./scoring.js";
 import {
   lockRouteServiceRequest,
   parseRouteServiceRequestJobData,
@@ -32,14 +37,33 @@ type TransactionClient = Pick<
   | "outboxEvent"
 >;
 
-type DecisionRejectedCandidate = {
-  operatorId: string;
-  rejectionReasons: RejectionReasonCode[];
+type LockTimeObservedFacts = {
+  status: "AVAILABLE" | "UNAVAILABLE" | "INACTIVE";
+  region: string;
+  maxConcurrentAssignments: number;
+  activeAssignmentCount: number;
+  requiredSkillLevel: number | null;
 };
 
-type DecisionRankedCandidate = ReturnType<
-  typeof evaluateRoutingPlan
->["rankedEligibleCandidates"][number];
+type LockTimeOutcome =
+  | {
+      operatorId: string;
+      scoringRank: number;
+      outcome: "ACCEPTED";
+      observedFacts: LockTimeObservedFacts;
+    }
+  | {
+      operatorId: string;
+      scoringRank: number;
+      outcome: "REJECTED";
+      reasons: ScoringRejectionReasonCode[];
+      observedFacts: LockTimeObservedFacts | null;
+    };
+
+type UnroutableReason =
+  | "NO_CANDIDATES"
+  | "ALL_CANDIDATES_REJECTED_AT_SCORING"
+  | "ALL_RANKED_CANDIDATES_REJECTED_AT_LOCK_TIME";
 
 export type RoutingAssignmentResult =
   | {
@@ -50,15 +74,15 @@ export type RoutingAssignmentResult =
       assignmentId: string;
       routingDecisionId: string;
       outboxEventId: string;
-      scoringVersion: typeof SCORING_VERSION;
+      scoringVersion: ScoringVersion;
     }
   | {
       kind: "unroutable";
       organizationId: string;
       serviceRequestId: string;
       routingDecisionId: string;
-      rejectionReasons: RejectionReasonCode[];
-      scoringVersion: typeof SCORING_VERSION;
+      rejectionReasons: ScoringRejectionReasonCode[];
+      scoringVersion: ScoringVersion;
     }
   | {
       kind: "already_processed";
@@ -67,7 +91,12 @@ export type RoutingAssignmentResult =
       terminalStatus: Exclude<LockedServiceRequest["status"], "PENDING">;
     };
 
-function toScoringInput(candidate: RoutingCandidateRow): RoutingCandidateInput {
+export type RouteServiceRequestOptions = {
+  scorer?: RoutingScorer;
+  now?: () => Date;
+};
+
+function toScoringCandidate(candidate: RoutingCandidateRow): ScoringCandidate {
   return {
     operatorId: candidate.operatorId,
     organizationId: candidate.organizationId,
@@ -76,30 +105,106 @@ function toScoringInput(candidate: RoutingCandidateRow): RoutingCandidateInput {
     maxConcurrentAssignments: candidate.maxConcurrentAssignments,
     activeAssignmentCount: candidate.activeAssignmentCount,
     requiredSkillLevel: candidate.requiredSkillLevel,
-    hasRequiredSkill: candidate.hasRequiredSkill,
+    lastAssignedAt: candidate.lastAssignedAt?.toISOString() ?? null,
+    totalAssignmentCount: candidate.totalAssignmentCount,
+  };
+}
+
+export function createScoringInput(
+  request: LockedServiceRequest,
+  candidates: readonly RoutingCandidateRow[],
+  evaluatedAt: string,
+): ScoringInput {
+  return {
+    evaluatedAt,
+    request: {
+      organizationId: request.organizationId,
+      serviceRequestId: request.id,
+      requiredSkillId: request.requiredSkillId,
+      region: request.region,
+      priority: request.priority,
+    },
+    candidates: candidates.map(toScoringCandidate),
+  };
+}
+
+function createLockTimeOutcome(
+  rankedCandidate: ScoredCandidate,
+  outcome: LockedOperatorOutcome,
+): LockTimeOutcome {
+  if (outcome.kind === "accepted") {
+    return {
+      operatorId: rankedCandidate.operatorId,
+      scoringRank: rankedCandidate.rank,
+      outcome: "ACCEPTED",
+      observedFacts: {
+        status: outcome.operator.status,
+        region: outcome.operator.region,
+        maxConcurrentAssignments: outcome.operator.maxConcurrentAssignments,
+        activeAssignmentCount: outcome.activeAssignmentCount,
+        requiredSkillLevel: outcome.requiredSkillLevel,
+      },
+    };
+  }
+
+  return {
+    operatorId: rankedCandidate.operatorId,
+    scoringRank: rankedCandidate.rank,
+    outcome: "REJECTED",
+    reasons: outcome.rejectionReasons,
+    observedFacts:
+      outcome.operator === null
+        ? null
+        : {
+            status: outcome.operator.status,
+            region: outcome.operator.region,
+            maxConcurrentAssignments: outcome.operator.maxConcurrentAssignments,
+            activeAssignmentCount: outcome.activeAssignmentCount ?? 0,
+            requiredSkillLevel: outcome.requiredSkillLevel,
+          },
   };
 }
 
 function collectRejectionReasons(
-  rejectedCandidates: DecisionRejectedCandidate[],
-): RejectionReasonCode[] {
-  return [
-    ...new Set(
-      rejectedCandidates.flatMap((candidate) => candidate.rejectionReasons),
+  rejectedCandidates: readonly RejectedCandidate[],
+  lockTimeOutcomes: readonly LockTimeOutcome[],
+): ScoringRejectionReasonCode[] {
+  const reasons = [
+    ...rejectedCandidates.flatMap((candidate) => candidate.reasons),
+    ...lockTimeOutcomes.flatMap((outcome) =>
+      outcome.outcome === "REJECTED" ? outcome.reasons : [],
     ),
   ];
+
+  return [...new Set(reasons)];
 }
 
-function buildAssignedDecisionSnapshot(options: {
+function resolveUnroutableReason(
+  scoringResult: ScoringResult,
+): UnroutableReason {
+  if (
+    scoringResult.rankedEligibleCandidates.length === 0 &&
+    scoringResult.rejectedCandidates.length === 0
+  ) {
+    return "NO_CANDIDATES";
+  }
+
+  if (scoringResult.rankedEligibleCandidates.length === 0) {
+    return "ALL_CANDIDATES_REJECTED_AT_SCORING";
+  }
+
+  return "ALL_RANKED_CANDIDATES_REJECTED_AT_LOCK_TIME";
+}
+
+function createDecisionSnapshotBase(options: {
   request: LockedServiceRequest;
   correlationId: string;
-  rankedEligibleCandidates: DecisionRankedCandidate[];
-  rejectedCandidates: DecisionRejectedCandidate[];
-  selectedCandidate: RoutingCandidateRow;
-  selectedOperator: Extract<LockedOperatorOutcome, { kind: "accepted" }>;
-}): Prisma.InputJsonValue {
+  scoringResult: ScoringResult;
+  lockTimeOutcomes: readonly LockTimeOutcome[];
+}) {
   return {
-    scoringVersion: SCORING_VERSION,
+    scoringVersion: options.scoringResult.scoringVersion,
+    evaluatedAt: options.scoringResult.evaluatedAt,
     correlationId: options.correlationId,
     request: {
       id: options.request.id,
@@ -109,28 +214,32 @@ function buildAssignedDecisionSnapshot(options: {
       region: options.request.region,
       status: options.request.status,
     },
-    candidates: {
-      rankedEligibleCandidates: options.rankedEligibleCandidates,
-      rejectedCandidates: options.rejectedCandidates,
+    scoring: {
+      outcome: options.scoringResult.outcome,
+      weightProfile: options.scoringResult.weightProfile,
+      initialSelectedOperatorId: options.scoringResult.selectedOperatorId,
+      rankedEligibleCandidates: options.scoringResult.rankedEligibleCandidates,
+      rejectedCandidates: options.scoringResult.rejectedCandidates,
     },
-    selectedOperator: {
-      operatorId: options.selectedOperator.operator.operatorId,
-      organizationId: options.selectedOperator.operator.organizationId,
-      status: options.selectedOperator.operator.status,
-      region: options.selectedOperator.operator.region,
-      maxConcurrentAssignments:
-        options.selectedOperator.operator.maxConcurrentAssignments,
-      activeAssignmentCount: options.selectedOperator.activeAssignmentCount,
-      requiredSkillLevel: options.selectedOperator.requiredSkillLevel,
-      rank:
-        options.rankedEligibleCandidates.find(
-          (candidate) =>
-            candidate.operatorId === options.selectedCandidate.operatorId,
-        )?.rank ?? 1,
-    },
+    lockTimeOutcomes: options.lockTimeOutcomes,
+  };
+}
+
+function buildAssignedDecisionSnapshot(options: {
+  request: LockedServiceRequest;
+  correlationId: string;
+  scoringResult: ScoringResult;
+  lockTimeOutcomes: readonly LockTimeOutcome[];
+  selectedOperatorId: string;
+}): Prisma.InputJsonValue {
+  return {
+    ...createDecisionSnapshotBase(options),
     result: {
       outcome: "ASSIGNED",
-      selectedOperatorId: options.selectedCandidate.operatorId,
+      initialSelectedOperatorId: options.scoringResult.selectedOperatorId,
+      selectedOperatorId: options.selectedOperatorId,
+      fallbackUsed:
+        options.selectedOperatorId !== options.scoringResult.selectedOperatorId,
     },
   };
 }
@@ -138,37 +247,34 @@ function buildAssignedDecisionSnapshot(options: {
 function buildUnroutableDecisionSnapshot(options: {
   request: LockedServiceRequest;
   correlationId: string;
-  rankedEligibleCandidates: DecisionRankedCandidate[];
-  rejectedCandidates: DecisionRejectedCandidate[];
+  scoringResult: ScoringResult;
+  lockTimeOutcomes: readonly LockTimeOutcome[];
+  rejectionReasons: readonly ScoringRejectionReasonCode[];
 }): Prisma.InputJsonValue {
   return {
-    scoringVersion: SCORING_VERSION,
-    correlationId: options.correlationId,
-    request: {
-      id: options.request.id,
-      organizationId: options.request.organizationId,
-      requiredSkillId: options.request.requiredSkillId,
-      priority: options.request.priority,
-      region: options.request.region,
-      status: options.request.status,
-    },
-    candidates: {
-      rankedEligibleCandidates: options.rankedEligibleCandidates,
-      rejectedCandidates: options.rejectedCandidates,
-    },
+    ...createDecisionSnapshotBase(options),
     result: {
       outcome: "UNROUTABLE",
+      initialSelectedOperatorId: options.scoringResult.selectedOperatorId,
       selectedOperatorId: null,
-      rejectionReasons: collectRejectionReasons(options.rejectedCandidates),
+      unroutableReason: resolveUnroutableReason(options.scoringResult),
+      rejectionReasons: options.rejectionReasons,
     },
   };
+}
+
+function defaultNow(): Date {
+  return new Date();
 }
 
 export async function executeRouteServiceRequest(
   database: DatabaseClient,
   jobData: RouteServiceRequestJobData | unknown,
+  options: RouteServiceRequestOptions = {},
 ): Promise<RoutingAssignmentResult> {
   const parsedJobData = parseRouteServiceRequestJobData(jobData);
+  const scorer = options.scorer ?? scoreRoutingCandidates;
+  const now = options.now ?? defaultNow;
 
   return database.$transaction(async (tx: TransactionClient) => {
     const lockedRequest = await lockRouteServiceRequest(tx, parsedJobData);
@@ -187,26 +293,21 @@ export async function executeRouteServiceRequest(
       serviceRequestId: lockedRequest.request.id,
     });
 
-    const plan = evaluateRoutingPlan(
-      {
-        organizationId: lockedRequest.request.organizationId,
-        serviceRequestId: lockedRequest.request.id,
-        requiredSkillId: lockedRequest.request.requiredSkillId,
-        region: lockedRequest.request.region,
-        priority: lockedRequest.request.priority,
-      },
-      candidates.map(toScoringInput),
+    const scoringInput = createScoringInput(
+      lockedRequest.request,
+      candidates,
+      now().toISOString(),
     );
+
+    const scoringResult = scorer(scoringInput);
 
     const candidateById = new Map(
       candidates.map((candidate) => [candidate.operatorId, candidate] as const),
     );
 
-    const rejectedCandidates: DecisionRejectedCandidate[] = [
-      ...plan.rejectedCandidates,
-    ];
+    const lockTimeOutcomes: LockTimeOutcome[] = [];
 
-    for (const rankedCandidate of plan.rankedEligibleCandidates) {
+    for (const rankedCandidate of scoringResult.rankedEligibleCandidates) {
       const candidate = candidateById.get(rankedCandidate.operatorId);
 
       if (!candidate) {
@@ -219,12 +320,11 @@ export async function executeRouteServiceRequest(
         candidate,
       );
 
-      if (operatorOutcome.kind !== "accepted") {
-        rejectedCandidates.push({
-          operatorId: candidate.operatorId,
-          rejectionReasons: operatorOutcome.rejectionReasons,
-        });
+      lockTimeOutcomes.push(
+        createLockTimeOutcome(rankedCandidate, operatorOutcome),
+      );
 
+      if (operatorOutcome.kind !== "accepted") {
         continue;
       }
 
@@ -235,10 +335,9 @@ export async function executeRouteServiceRequest(
       const decisionSnapshot = buildAssignedDecisionSnapshot({
         request: lockedRequest.request,
         correlationId: parsedJobData.correlationId,
-        rankedEligibleCandidates: plan.rankedEligibleCandidates,
-        rejectedCandidates,
-        selectedCandidate: candidate,
-        selectedOperator: operatorOutcome,
+        scoringResult,
+        lockTimeOutcomes,
+        selectedOperatorId: candidate.operatorId,
       });
 
       const assignment = await tx.assignment.create({
@@ -257,7 +356,7 @@ export async function executeRouteServiceRequest(
           organizationId: lockedRequest.request.organizationId,
           serviceRequestId: lockedRequest.request.id,
           assignmentId: assignment.id,
-          scoringVersion: SCORING_VERSION,
+          scoringVersion: scoringResult.scoringVersion,
           outcome: "ASSIGNED",
           decisionSnapshot,
         },
@@ -286,7 +385,7 @@ export async function executeRouteServiceRequest(
             operatorId: candidate.operatorId,
             assignmentId: assignment.id,
             routingDecisionId: routingDecision.id,
-            scoringVersion: SCORING_VERSION,
+            scoringVersion: scoringResult.scoringVersion,
             correlationId: parsedJobData.correlationId,
           },
         },
@@ -300,18 +399,22 @@ export async function executeRouteServiceRequest(
         assignmentId: assignment.id,
         routingDecisionId: routingDecision.id,
         outboxEventId: outboxEvent.id,
-        scoringVersion: SCORING_VERSION,
+        scoringVersion: scoringResult.scoringVersion,
       };
     }
 
     const routingDecisionId = randomUUID();
-    const rejectionReasons = collectRejectionReasons(rejectedCandidates);
+    const rejectionReasons = collectRejectionReasons(
+      scoringResult.rejectedCandidates,
+      lockTimeOutcomes,
+    );
 
     const decisionSnapshot = buildUnroutableDecisionSnapshot({
       request: lockedRequest.request,
       correlationId: parsedJobData.correlationId,
-      rankedEligibleCandidates: plan.rankedEligibleCandidates,
-      rejectedCandidates,
+      scoringResult,
+      lockTimeOutcomes,
+      rejectionReasons,
     });
 
     const routingDecision = await tx.routingDecision.create({
@@ -320,7 +423,7 @@ export async function executeRouteServiceRequest(
         organizationId: lockedRequest.request.organizationId,
         serviceRequestId: lockedRequest.request.id,
         assignmentId: null,
-        scoringVersion: SCORING_VERSION,
+        scoringVersion: scoringResult.scoringVersion,
         outcome: "UNROUTABLE",
         decisionSnapshot,
       },
@@ -341,7 +444,7 @@ export async function executeRouteServiceRequest(
       serviceRequestId: lockedRequest.request.id,
       routingDecisionId: routingDecision.id,
       rejectionReasons,
-      scoringVersion: SCORING_VERSION,
+      scoringVersion: scoringResult.scoringVersion,
     };
   });
 }

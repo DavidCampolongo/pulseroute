@@ -82,7 +82,7 @@ const logger = createWorkerLogger({
   logLevel: "silent",
 });
 
-type FaultMode = "none" | "transient" | "persistent";
+type FaultMode = "none" | "transient";
 
 type RoutingFixture = {
   organizationId: string;
@@ -99,6 +99,7 @@ type DurableRoutingState = {
 };
 
 const faultModes = new Map<string, FaultMode>();
+const scoringFaultRequestIds = new Set<string>();
 const attemptObservations = new Map<string, number[]>();
 
 let worker:
@@ -401,6 +402,9 @@ beforeAll(async () => {
   const routingProcessor = createRoutingProcessor({
     database,
     logger,
+    faultInjectScoring: true,
+    shouldInjectScoringFault: (input) =>
+      scoringFaultRequestIds.has(input.request.serviceRequestId),
   });
 
   const faultInjectingProcessor: Processor<
@@ -422,10 +426,6 @@ beforeAll(async () => {
       throw new Error(
         `Injected transient routing failure ${job.attemptsMade + 1}`,
       );
-    }
-
-    if (faultMode === "persistent") {
-      throw new Error("Injected persistent routing failure");
     }
 
     return routingProcessor(job, token, signal);
@@ -560,19 +560,26 @@ describe("routing retry and dead-letter behavior", () => {
     }
   }, 10_000);
 
-  it("dead-letters a persistent unexpected routing failure", async () => {
+  it("dead-letters a persistent scoring fault with no durable writes and routes after the fault is disabled", async () => {
     const fixture = await createRoutingFixture();
 
-    const sourceJobId = `routing-persistent-${randomUUID()}`;
+    const sourceJobId = `routing-scoring-fault-${randomUUID()}`;
+    const recoveryJobId = `routing-scoring-recovery-${randomUUID()}`;
 
-    const correlationId = `request-persistent-${randomUUID()}`;
+    const correlationId = `request-scoring-fault-${randomUUID()}`;
+    const recoveryCorrelationId = `request-scoring-recovery-${randomUUID()}`;
 
     const deadLetterJobId = createDeadLetterJobId(
       QUEUE_NAMES.routing,
       sourceJobId,
     );
 
-    faultModes.set(correlationId, "persistent");
+    const recoveryDeadLetterJobId = createDeadLetterJobId(
+      QUEUE_NAMES.routing,
+      recoveryJobId,
+    );
+
+    scoringFaultRequestIds.add(fixture.serviceRequestId);
 
     try {
       const sourceJob = await addRoutingJob({
@@ -583,7 +590,7 @@ describe("routing retry and dead-letter behavior", () => {
 
       await expect(
         sourceJob.waitUntilFinished(routingQueueEvents, 5_000),
-      ).rejects.toThrow("Injected persistent routing failure");
+      ).rejects.toThrow("Injected scoring failure");
 
       expect(attemptObservations.get(correlationId)).toEqual([0, 1, 2]);
 
@@ -596,13 +603,9 @@ describe("routing retry and dead-letter behavior", () => {
       }
 
       expect(await savedSourceJob.getState()).toBe("failed");
-
       expect(savedSourceJob.attemptsMade).toBe(3);
       expect(savedSourceJob.attemptsStarted).toBe(3);
-
-      expect(savedSourceJob.failedReason).toBe(
-        "Injected persistent routing failure",
-      );
+      expect(savedSourceJob.failedReason).toBe("Injected scoring failure");
 
       const deadLetterJob = await waitForJob<DeadLetteredJobData>(
         deadLetterQueue,
@@ -610,7 +613,6 @@ describe("routing retry and dead-letter behavior", () => {
       );
 
       expect(deadLetterJob.name).toBe(JOB_NAMES.deadLetteredJob);
-
       expect(deadLetterJob.data).toMatchObject({
         sourceQueue: QUEUE_NAMES.routing,
         sourceJobId,
@@ -619,11 +621,9 @@ describe("routing retry and dead-letter behavior", () => {
         serviceRequestId: fixture.serviceRequestId,
         correlationId,
         attemptsMade: 3,
-        failureReason: "Injected persistent routing failure",
+        failureReason: "Injected scoring failure",
       });
-
       expect(await deadLetterJob.getState()).toBe("waiting");
-
       expect(await countQueueJobs(deadLetterQueue)).toBe(1);
 
       expect(await readDurableRoutingState(fixture)).toEqual({
@@ -632,13 +632,42 @@ describe("routing retry and dead-letter behavior", () => {
         routingDecisionCount: 0,
         outboxEventCount: 0,
       });
+
+      scoringFaultRequestIds.delete(fixture.serviceRequestId);
+
+      const recoveryJob = await addRoutingJob({
+        fixture,
+        sourceJobId: recoveryJobId,
+        correlationId: recoveryCorrelationId,
+      });
+
+      const recoveryResult = await recoveryJob.waitUntilFinished(
+        routingQueueEvents,
+        5_000,
+      );
+
+      expect(recoveryResult.kind).toBe("assigned");
+      expect(attemptObservations.get(recoveryCorrelationId)).toEqual([0]);
+      expect(
+        await deadLetterQueue.getJob(recoveryDeadLetterJobId),
+      ).toBeUndefined();
+
+      expect(await readDurableRoutingState(fixture)).toEqual({
+        serviceRequestStatus: "ASSIGNED",
+        assignmentCount: 1,
+        routingDecisionCount: 1,
+        outboxEventCount: 1,
+      });
     } finally {
-      faultModes.delete(correlationId);
+      scoringFaultRequestIds.delete(fixture.serviceRequestId);
       attemptObservations.delete(correlationId);
+      attemptObservations.delete(recoveryCorrelationId);
 
       await removeQueueJob(routingQueue, sourceJobId);
+      await removeQueueJob(routingQueue, recoveryJobId);
 
       await removeQueueJob(deadLetterQueue, deadLetterJobId);
+      await removeQueueJob(deadLetterQueue, recoveryDeadLetterJobId);
 
       await clearRoutingFixture(fixture);
     }
