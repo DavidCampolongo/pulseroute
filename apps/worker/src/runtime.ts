@@ -2,11 +2,17 @@ import { createDatabaseClient, type DatabaseClient } from "@pulseroute/db";
 import type {
   RouteServiceRequestJobData,
   ServiceRequestIngestedJobData,
+  WebhookDeliveryJobData,
 } from "@pulseroute/shared";
 import type { Worker } from "bullmq";
 import type { Logger } from "pino";
 
 import type { WorkerConfig } from "./config.js";
+import {
+  DEFAULT_WEBHOOK_DELIVERY_BASE_DELAY_MS,
+  DEFAULT_WEBHOOK_DELIVERY_MAX_DELAY_MS,
+} from "./delivery-backoff.js";
+import { DeliveryScheduler } from "./delivery-scheduler.js";
 import {
   createIncomingWorker,
   type IncomingProcessorResult,
@@ -20,6 +26,10 @@ import {
   type PulseRouteQueues,
   waitForPulseRouteQueues,
 } from "./queues.js";
+import {
+  createWebhookDeliveryWorker,
+  type WebhookDeliveryProcessorResult,
+} from "./webhook-delivery-worker.js";
 
 export type WorkerShutdownReason = NodeJS.Signals | "startup_failure";
 
@@ -35,11 +45,23 @@ export type RuntimeRoutingWorker = Pick<
   "close"
 >;
 
+export type RuntimeDeliveryScheduler = Pick<
+  DeliveryScheduler,
+  "start" | "stop"
+>;
+
+export type RuntimeWebhookDeliveryWorker = Pick<
+  Worker<WebhookDeliveryJobData, WebhookDeliveryProcessorResult, string>,
+  "close"
+>;
+
 export type WorkerRuntimeOptions = {
   database: DatabaseClient;
   queues: PulseRouteQueues;
   incomingWorker: RuntimeIncomingWorker;
   publisher: RuntimePublisher;
+  deliveryScheduler?: RuntimeDeliveryScheduler;
+  webhookDeliveryWorker?: RuntimeWebhookDeliveryWorker;
   logger: Logger;
 };
 
@@ -66,6 +88,9 @@ export class WorkerRuntime {
   private readonly queues: PulseRouteQueues;
   private readonly incomingWorker: RuntimeIncomingWorker;
   private readonly publisher: RuntimePublisher;
+  private readonly deliveryScheduler: RuntimeDeliveryScheduler | undefined;
+  private readonly webhookDeliveryWorker:
+    RuntimeWebhookDeliveryWorker | undefined;
   private readonly logger: Logger;
 
   private routingWorker: RuntimeRoutingWorker | undefined;
@@ -77,6 +102,8 @@ export class WorkerRuntime {
     this.queues = options.queues;
     this.incomingWorker = options.incomingWorker;
     this.publisher = options.publisher;
+    this.deliveryScheduler = options.deliveryScheduler;
+    this.webhookDeliveryWorker = options.webhookDeliveryWorker;
     this.logger = options.logger.child({
       component: "worker-runtime",
     });
@@ -93,6 +120,7 @@ export class WorkerRuntime {
 
     await this.publisher.start();
 
+    this.deliveryScheduler?.start();
     this.started = true;
 
     this.logger.info(
@@ -100,6 +128,7 @@ export class WorkerRuntime {
         incomingQueue: this.queues.incomingEvents.name,
         routingQueue: this.queues.routing.name,
         deadLetterQueue: this.queues.deadLetter.name,
+        webhookDeliveryQueue: this.queues.webhookDelivery.name,
       },
       "Worker runtime started",
     );
@@ -124,6 +153,21 @@ export class WorkerRuntime {
     );
 
     try {
+      if (this.deliveryScheduler) {
+        await this.deliveryScheduler.stop();
+
+        this.logger.info(
+          {
+            reason,
+          },
+          "Delivery scheduler intake stopped",
+        );
+      }
+    } catch (error) {
+      shutdownErrors.push(error);
+    }
+
+    try {
       await this.publisher.stop();
 
       this.logger.info(
@@ -132,6 +176,29 @@ export class WorkerRuntime {
         },
         "Outbox publisher intake stopped",
       );
+    } catch (error) {
+      shutdownErrors.push(error);
+    }
+    try {
+      if (this.webhookDeliveryWorker) {
+        const deliveryDrainPromise = this.webhookDeliveryWorker.close();
+
+        this.logger.info(
+          {
+            reason,
+          },
+          "Webhook delivery worker stopped; draining bounded active requests",
+        );
+
+        await deliveryDrainPromise;
+
+        this.logger.info(
+          {
+            reason,
+          },
+          "Webhook delivery worker active requests drained",
+        );
+      }
     } catch (error) {
       shutdownErrors.push(error);
     }
@@ -233,6 +300,8 @@ export async function createWorkerRuntime(
   let queues: PulseRouteQueues | undefined;
   let incomingWorker: ReturnType<typeof createIncomingWorker> | undefined;
   let routingWorker: ReturnType<typeof createRoutingWorker> | undefined;
+  let webhookDeliveryWorker:
+    ReturnType<typeof createWebhookDeliveryWorker> | undefined;
 
   try {
     queues = createPulseRouteQueues(config.redisUrl);
@@ -272,10 +341,31 @@ export async function createWorkerRuntime(
         "Routing worker error",
       );
     });
+    webhookDeliveryWorker = createWebhookDeliveryWorker({
+      database,
+      logger,
+      redisUrl: config.redisUrl,
+      webhookUrl: config.webhookDeliveryUrl,
+      webhookSecret: config.outboundWebhookSecret,
+      timeoutMs: config.webhookDeliveryTimeoutMs,
+      maxAttempts: 5,
+      baseDelayMs: DEFAULT_WEBHOOK_DELIVERY_BASE_DELAY_MS,
+      maxDelayMs: DEFAULT_WEBHOOK_DELIVERY_MAX_DELAY_MS,
+    });
+
+    webhookDeliveryWorker.on("error", (error) => {
+      logger.error(
+        {
+          err: error,
+        },
+        "Webhook delivery worker error",
+      );
+    });
 
     await Promise.all([
       incomingWorker.waitUntilReady(),
       routingWorker.waitUntilReady(),
+      webhookDeliveryWorker.waitUntilReady(),
     ]);
 
     const publisher = new InternalOutboxPublisher({
@@ -283,12 +373,24 @@ export async function createWorkerRuntime(
       incomingQueue: queues.incomingEvents,
       logger,
     });
+    const deliveryScheduler = new DeliveryScheduler({
+      database,
+      webhookDeliveryQueue: queues.webhookDelivery,
+      deadLetterQueue: queues.deadLetter,
+      logger,
+      claimTimeoutMs: config.webhookDeliveryTimeoutMs + 5_000,
+      maxAttempts: 5,
+      baseDelayMs: DEFAULT_WEBHOOK_DELIVERY_BASE_DELAY_MS,
+      maxDelayMs: DEFAULT_WEBHOOK_DELIVERY_MAX_DELAY_MS,
+    });
 
     const runtime = new WorkerRuntime({
       database,
       queues,
       incomingWorker,
       publisher,
+      deliveryScheduler,
+      webhookDeliveryWorker,
       logger,
     });
 
@@ -308,6 +410,13 @@ export async function createWorkerRuntime(
       const workerToClose = routingWorker;
 
       await attemptStartupCleanup(logger, "routing-worker", () =>
+        workerToClose.close(true),
+      );
+    }
+    if (webhookDeliveryWorker) {
+      const workerToClose = webhookDeliveryWorker;
+
+      await attemptStartupCleanup(logger, "webhook-delivery-worker", () =>
         workerToClose.close(true),
       );
     }

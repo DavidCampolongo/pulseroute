@@ -17,11 +17,19 @@ const sensitivePaths = [
   "databaseUrl",
   "redisUrl",
   "webhookSecret",
+  "webhookDeliveryUrl",
+  "outboundWebhookSecret",
   "WEBHOOK_SECRET",
+  "WEBHOOK_DELIVERY_URL",
+  "OUTBOUND_WEBHOOK_SECRET",
   "config.databaseUrl",
   "config.redisUrl",
   "config.webhookSecret",
+  "config.webhookDeliveryUrl",
+  "config.outboundWebhookSecret",
   "config.WEBHOOK_SECRET",
+  "config.WEBHOOK_DELIVERY_URL",
+  "config.OUTBOUND_WEBHOOK_SECRET",
 ];
 
 export function createWorkerLogger(

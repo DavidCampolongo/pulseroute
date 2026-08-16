@@ -2,6 +2,7 @@ export const PROJECT_NAME = "PulseRoute";
 
 export const EVENT_TYPES = {
   serviceRequestCreated: "service_request.created",
+  serviceRequestAssigned: "service_request.assigned",
 } as const;
 
 export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES];
@@ -19,6 +20,7 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 export const JOB_NAMES = {
   serviceRequestIngested: "service-request-ingested",
   routeServiceRequest: "route-service-request",
+  deliverWebhook: "deliver-webhook",
   deadLetteredJob: "dead-lettered-job",
 } as const;
 
@@ -37,10 +39,19 @@ export type RouteServiceRequestJobData = {
   correlationId: string;
 };
 
+export type WebhookDeliveryJobData = {
+  outboxEventId: string;
+  organizationId: string;
+  correlationId: string;
+  expectedAttemptNumber: number;
+  claimStartedAt: string;
+};
+
 export type DeadLetteredJobData = {
   sourceQueue: QueueName;
   sourceJobId: string;
   sourceJobName: string;
+  outboxEventId?: string;
   organizationId: string | null;
   serviceRequestId: string | null;
   correlationId: string | null;
