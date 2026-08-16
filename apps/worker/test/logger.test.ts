@@ -106,10 +106,15 @@ describe("worker logger", () => {
       {
         databaseUrl: "postgresql://user:database-secret@localhost/database",
         redisUrl: "redis://:redis-secret@localhost:6379",
+        webhookDeliveryUrl: "https://url-secret@receiver.example/webhooks",
+        outboundWebhookSecret: "top-level-outbound-secret",
         config: {
           databaseUrl:
             "postgresql://user:nested-database-secret@localhost/database",
           redisUrl: "redis://:nested-redis-secret@localhost:6379",
+          webhookDeliveryUrl:
+            "https://nested-url-secret@receiver.example/webhooks",
+          outboundWebhookSecret: "nested-outbound-secret",
         },
       },
       "Sensitive-value test",
@@ -126,6 +131,10 @@ describe("worker logger", () => {
 
     expect(rawOutput).not.toContain("database-secret");
     expect(rawOutput).not.toContain("redis-secret");
+    expect(rawOutput).not.toContain("outbound-secret");
+    expect(rawOutput).not.toContain("url-secret");
+    expect(entry).not.toHaveProperty("webhookDeliveryUrl");
+    expect(entry).not.toHaveProperty("outboundWebhookSecret");
     expect(entry).not.toHaveProperty("databaseUrl");
     expect(entry).not.toHaveProperty("redisUrl");
     expect(entry.config).toEqual({});
