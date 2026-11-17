@@ -2,9 +2,10 @@
   "name": "pulseroute",
   "version": "1.0.0",
   "private": true,
-  "description": "",
+  "description": "Signed webhook ingestion, transactional routing, and reliable background delivery in TypeScript.",
   "main": "index.js",
   "scripts": {
+    "demo": "node --env-file=.env scripts/demo.mjs",
     "build": "pnpm -r run build",
     "pretypecheck": "pnpm --filter @pulseroute/db --filter @pulseroute/shared --filter @pulseroute/scoring --filter @pulseroute/fake-receiver run build",
     "typecheck": "pnpm -r run typecheck",
@@ -27,7 +28,7 @@
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "11.12.0"
+      "version": "11.24.0"
     }
   },
   "type": "module",
